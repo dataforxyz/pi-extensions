@@ -38,6 +38,8 @@ Pause and reflect on your progress:
 
 Update the task file with your reflection, then continue working.`;
 
+const ASYNC_WAIT_INSTRUCTIONS = `Async/waiting rule: If async subagents, chains, or other background tools are pending and the next useful checklist item depends on their result, do not call ralph_done just to poll or spin. Record the pending run IDs/status and what you are waiting for in the task file, then stop/end the turn or use a watcher such as return_on. Continue the loop only when you can make independent, non-conflicting progress that adds value, or after the pending result is available and consumed.`;
+
 type LoopStatus = "active" | "paused" | "completed";
 
 interface LoopState {
@@ -53,6 +55,7 @@ interface LoopState {
 	startedAt: string;
 	completedAt?: string;
 	lastReflectionAt: number; // Last iteration we reflected at
+	continuationQueued?: boolean; // True while a Ralph continuation prompt is already queued
 }
 
 const STATUS_ICONS: Record<LoopStatus, string> = { active: "▶", paused: "⏸", completed: "✓" };
@@ -242,14 +245,15 @@ export default function (pi: ExtensionAPI) {
 		);
 
 		if (state.itemsPerIteration > 0) {
-			parts.push(`**THIS ITERATION: Process approximately ${state.itemsPerIteration} items, then call ralph_done.**\n`);
-			parts.push(`1. Work on the next ~${state.itemsPerIteration} items from your checklist`);
+			parts.push(`**THIS ITERATION: Process up to approximately ${state.itemsPerIteration} actionable items. Do not advance the loop just to wait on background work.**\n`);
+			parts.push(`1. Work on the next ~${state.itemsPerIteration} unblocked items from your checklist`);
 		} else {
-			parts.push(`1. Continue working on the task`);
+			parts.push(`1. Continue working on unblocked task items`);
 		}
 		parts.push(`2. Update the task file (${state.taskFile}) with your progress`);
-		parts.push(`3. When FULLY COMPLETE, respond with: ${COMPLETE_MARKER}`);
-		parts.push(`4. Otherwise, call the ralph_done tool to proceed to next iteration`);
+		parts.push(`3. ${ASYNC_WAIT_INSTRUCTIONS}`);
+		parts.push(`4. When FULLY COMPLETE, respond with: ${COMPLETE_MARKER}`);
+		parts.push(`5. Otherwise, call the ralph_done tool only after real progress, and only if another useful unblocked iteration should run now`);
 
 		return parts.join("\n");
 	}
@@ -330,6 +334,7 @@ export default function (pi: ExtensionAPI) {
 				status: "active",
 				startedAt: existing?.startedAt || new Date().toISOString(),
 				lastReflectionAt: 0,
+				continuationQueued: false,
 			};
 
 			saveState(ctx, state);
@@ -341,6 +346,8 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify(`Could not read task file: ${taskFile}`, "error");
 				return;
 			}
+			state.continuationQueued = true;
+			saveState(ctx, state);
 			pi.sendUserMessage(buildPrompt(state, content, false));
 		},
 
@@ -401,6 +408,8 @@ export default function (pi: ExtensionAPI) {
 
 			const needsReflection =
 				state.reflectEvery > 0 && state.iteration > 1 && (state.iteration - 1) % state.reflectEvery === 0;
+			state.continuationQueued = true;
+			saveState(ctx, state);
 			pi.sendUserMessage(buildPrompt(state, content, needsReflection));
 		},
 
@@ -613,7 +622,8 @@ Examples:
 		promptSnippet: "Start a persistent multi-iteration development loop with pacing and reflection controls.",
 		promptGuidelines: [
 			"Use this tool when the user explicitly wants an iterative loop, autonomous repeated passes, or paced multi-step execution.",
-			"After starting a loop, continue each finished iteration with ralph_done unless the completion marker has already been emitted.",
+			"After starting a loop, continue each finished iteration with ralph_done unless the completion marker has already been emitted or progress is blocked on pending async work.",
+			"If async subagents/tools are pending and their result is needed, record the run IDs/status in the task file and stop/end the turn or use a watcher instead of spinning Ralph.",
 		],
 		parameters: Type.Object({
 			name: Type.String({ description: "Loop name (e.g., 'refactor-auth')" }),
@@ -646,12 +656,15 @@ Examples:
 				status: "active",
 				startedAt: new Date().toISOString(),
 				lastReflectionAt: 0,
+				continuationQueued: false,
 			};
 
 			saveState(ctx, state);
 			currentLoop = loopName;
 			updateUI(ctx);
 
+			state.continuationQueued = true;
+			saveState(ctx, state);
 			pi.sendUserMessage(buildPrompt(state, params.taskContent, false), { deliverAs: "followUp" });
 
 			return {
@@ -669,7 +682,8 @@ Examples:
 		promptSnippet: "Advance an active Ralph loop after completing the current iteration.",
 		promptGuidelines: [
 			"Call this after making real iteration progress so Ralph can queue the next prompt.",
-			"Do not call this if there is no active loop, if pending messages are already queued, or if the completion marker has already been emitted.",
+			"Do not call this if there is no active loop, if pending messages are already queued, if the completion marker has already been emitted, or if the next useful work is blocked on pending async subagents/tools.",
+			"When blocked on async work, update the Ralph task file with pending run IDs/status and end the turn or register a watcher instead of calling ralph_done.",
 		],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -682,11 +696,23 @@ Examples:
 				return { content: [{ type: "text", text: "Ralph loop is not active." }], details: {} };
 			}
 
-			if (ctx.hasPendingMessages()) {
-				return {
-					content: [{ type: "text", text: "Pending messages already queued. Skipping ralph_done." }],
-					details: {},
-				};
+			// Do not gate on ctx.hasPendingMessages() here. Other extensions can
+			// enqueue/append non-user work around tool completion, and Pi only exposes a
+			// coarse boolean rather than queue contents. Instead, use a Ralph-specific
+			// idempotency guard so we can continue past unrelated pending work without
+			// stacking multiple Ralph continuation prompts. If the guard is still set but
+			// Pi no longer reports pending messages, treat it as stale: the queued Ralph
+			// prompt has already started/been consumed (not all delivery paths reliably
+			// clear it via before_agent_start).
+			if (state.continuationQueued) {
+				if (ctx.hasPendingMessages()) {
+					return {
+						content: [{ type: "text", text: "Ralph continuation already queued. Skipping duplicate ralph_done." }],
+						details: {},
+					};
+				}
+				state.continuationQueued = false;
+				saveState(ctx, state);
 			}
 
 			// Increment iteration
@@ -717,6 +743,8 @@ Examples:
 			}
 
 			// Queue next iteration - use followUp so user can still interrupt
+			state.continuationQueued = true;
+			saveState(ctx, state);
 			pi.sendUserMessage(buildPrompt(state, content, needsReflection), { deliverAs: "followUp" });
 
 			return {
@@ -734,15 +762,19 @@ Examples:
 		if (!state || state.status !== "active") return;
 
 		const iterStr = `${state.iteration}${state.maxIterations > 0 ? `/${state.maxIterations}` : ""}`;
+		if (event.prompt.includes(`🔄 RALPH LOOP: ${state.name} | Iteration ${state.iteration}`) && state.continuationQueued) {
+			state.continuationQueued = false;
+			saveState(ctx, state);
+		}
 
 		let instructions = `You are in a Ralph loop working on: ${state.taskFile}\n`;
 		if (state.itemsPerIteration > 0) {
 			instructions += `- Work on ~${state.itemsPerIteration} items this iteration\n`;
 		}
 		instructions += `- Update the task file as you progress\n`;
+		instructions += `- ${ASYNC_WAIT_INSTRUCTIONS}\n`;
 		instructions += `- When FULLY COMPLETE: ${COMPLETE_MARKER}\n`;
-		instructions += `- Otherwise, call ralph_done tool to proceed to next iteration`;
-
+		instructions += `- Otherwise, call ralph_done only after real progress and only when another useful unblocked iteration should run now`;
 		return {
 			systemPrompt: event.systemPrompt + `\n[RALPH LOOP - ${state.name} - Iteration ${iterStr}]\n\n${instructions}`,
 		};

@@ -43,8 +43,9 @@ You ask Pi to set up a ralph-wiggum loop.
   3. How often to commit
   4. (optionally) After how many items it should take a step back and self-reflect
 - Pi runs `ralph_start`, beginning iteration 1.
-  - It gets a prompt telling it to work on the task, update the task file, and call ralph_done when it finishes that iteration
-  - When the iteration is done, it calls `ralph_done`, resending the same prompt*
+  - It gets a prompt telling it to work on unblocked task items, update the task file, and call `ralph_done` only when another useful unblocked iteration should run now.
+  - If it launches async subagents/chains/background tools and the next useful work depends on their result, it records the pending run IDs/status in the task file and stops/ends the turn or uses a watcher instead of spinning iterations.
+  - When an iteration has made real progress and is not blocked on pending async work, it calls `ralph_done`, resending the same prompt.
 - Pi runs until either:
   - All tasks are done (Pi sends `<promise>COMPLETE</promise>`)
   - Max iterations (default 50)

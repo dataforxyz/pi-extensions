@@ -22,9 +22,10 @@ ralph_start({
 1. **Write the task file**: Create `.ralph/<name>.md` with the task content. The tool does NOT create this file—you must write it yourself using the Write tool.
 2. Work on the task and update the file each iteration.
 3. Record verification evidence (commands run, file paths, outputs) in the task file.
-4. Call `ralph_done` to proceed to the next iteration.
-5. Output `<promise>COMPLETE</promise>` when finished.
-6. Stop when complete or when max iterations is reached (default 50).
+4. Call `ralph_done` to proceed to the next iteration only after real progress and only when another useful unblocked iteration should run now.
+5. If async subagents, chains, or background tools are pending and the next useful checklist item depends on their result, do **not** call `ralph_done` just to poll or spin. Record pending run IDs/status in the task file, then end the turn or use a watcher such as `return_on`.
+6. Output `<promise>COMPLETE</promise>` when finished.
+7. Stop when complete or when max iterations is reached (default 50).
 
 ## User Commands
 
@@ -69,5 +70,6 @@ Brief description.
 1. Write a clear checklist with discrete items.
 2. Update checklist and notes as you go.
 3. Capture verification evidence for completed items.
-4. Reflect when stuck to reassess approach.
-5. Output the completion marker only when truly done.
+4. When waiting on async agents/tools, park the loop instead of advancing iterations unless there is independent, non-conflicting work that adds value.
+5. Reflect when stuck to reassess approach.
+6. Output the completion marker only when truly done.
