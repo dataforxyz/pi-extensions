@@ -50,6 +50,7 @@ interface LoopState {
 	itemsPerIteration: number; // Prompt hint only - "process N items per turn"
 	reflectEvery: number; // Reflect every N iterations
 	reflectInstructions: string;
+	endInstructions: string; // Only shown after the loop emits COMPLETE_MARKER / ends
 	active: boolean; // Backwards compat
 	status: LoopStatus;
 	startedAt: string;
@@ -126,6 +127,7 @@ export default function (pi: ExtensionAPI) {
 		if ("lastReflectionAtItems" in raw && raw.lastReflectionAt === undefined) {
 			raw.lastReflectionAt = (raw as any).lastReflectionAtItems;
 		}
+		if (raw.endInstructions === undefined) raw.endInstructions = "";
 		return raw as LoopState;
 	}
 
@@ -165,6 +167,19 @@ export default function (pi: ExtensionAPI) {
 		if (message && ctx.hasUI) ctx.ui.notify(message, "info");
 	}
 
+	function formatEndInstructions(state: LoopState): string {
+		const instructions = state.endInstructions?.trim();
+		if (!instructions) return "";
+		return `
+
+───────────────────────────────────────────────────────────────────────
+📌 END-OF-LOOP INSTRUCTIONS
+───────────────────────────────────────────────────────────────────────
+These instructions were intentionally held back until the Ralph loop ended. Read and follow them now:
+
+${instructions}`;
+	}
+
 	function completeLoop(ctx: ExtensionContext, state: LoopState, banner: string): void {
 		state.status = "completed";
 		state.completedAt = new Date().toISOString();
@@ -172,7 +187,7 @@ export default function (pi: ExtensionAPI) {
 		saveState(ctx, state);
 		currentLoop = null;
 		updateUI(ctx);
-		pi.sendUserMessage(banner);
+		pi.sendUserMessage(banner + formatEndInstructions(state));
 	}
 
 	function stopLoop(ctx: ExtensionContext, state: LoopState, message?: string): void {
@@ -268,6 +283,8 @@ export default function (pi: ExtensionAPI) {
 			itemsPerIteration: 0,
 			reflectEvery: 0,
 			reflectInstructions: DEFAULT_REFLECT_INSTRUCTIONS,
+			endInstructions: "",
+			endInstructionsFile: "",
 		};
 
 		for (let i = 0; i < tokens.length; i++) {
@@ -285,6 +302,12 @@ export default function (pi: ExtensionAPI) {
 			} else if (tok === "--reflect-instructions" && next) {
 				result.reflectInstructions = next.replace(/^"|"$/g, "");
 				i++;
+			} else if (tok === "--end-instructions" && next) {
+				result.endInstructions = next.replace(/^"|"$/g, "");
+				i++;
+			} else if (tok === "--end-instructions-file" && next) {
+				result.endInstructionsFile = next.replace(/^"|"$/g, "");
+				i++;
 			} else if (!tok.startsWith("--")) {
 				result.name = tok;
 			}
@@ -299,10 +322,18 @@ export default function (pi: ExtensionAPI) {
 			const args = parseArgs(rest);
 			if (!args.name) {
 				ctx.ui.notify(
-					"Usage: /ralph start <name|path> [--items-per-iteration N] [--reflect-every N] [--max-iterations N]",
+					"Usage: /ralph start <name|path> [--items-per-iteration N] [--reflect-every N] [--max-iterations N] [--end-instructions \"TEXT\"|--end-instructions-file PATH]",
 					"warning",
 				);
 				return;
+			}
+
+			if (args.endInstructionsFile) {
+				const filePath = path.isAbsolute(args.endInstructionsFile)
+					? args.endInstructionsFile
+					: path.resolve(ctx.cwd, args.endInstructionsFile);
+				args.endInstructions = tryRead(filePath) ?? "";
+				if (!args.endInstructions && ctx.hasUI) ctx.ui.notify(`Could not read end-instructions file: ${filePath}`, "warning");
 			}
 
 			const isPath = args.name.includes("/") || args.name.includes("\\");
@@ -330,6 +361,7 @@ export default function (pi: ExtensionAPI) {
 				itemsPerIteration: args.itemsPerIteration,
 				reflectEvery: args.reflectEvery,
 				reflectInstructions: args.reflectInstructions,
+				endInstructions: args.endInstructions,
 				active: true,
 				status: "active",
 				startedAt: existing?.startedAt || new Date().toISOString(),
@@ -561,9 +593,11 @@ Commands:
   /ralph-stop                         Stop active loop (idle only)
 
 Options:
-  --items-per-iteration N  Suggest N items per turn (prompt hint)
-  --reflect-every N        Reflect every N iterations
-  --max-iterations N       Stop after N iterations (default 50)
+  --items-per-iteration N       Suggest N items per turn (prompt hint)
+  --reflect-every N             Reflect every N iterations
+  --max-iterations N            Stop after N iterations (default 50)
+  --end-instructions "TEXT"     Show TEXT only after loop completion
+  --end-instructions-file PATH  Read completion-only instructions from PATH
 
 To stop: press ESC to interrupt, then run /ralph-stop when idle
 
@@ -631,6 +665,7 @@ Examples:
 			itemsPerIteration: Type.Optional(Type.Number({ description: "Suggest N items per turn (0 = no limit)" })),
 			reflectEvery: Type.Optional(Type.Number({ description: "Reflect every N iterations" })),
 			maxIterations: Type.Optional(Type.Number({ description: "Max iterations (default: 50)", default: 50 })),
+			endInstructions: Type.Optional(Type.String({ description: "Instructions to reveal only after the loop ends/completes; not included in normal iteration prompts" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const loopName = sanitize(params.name);
@@ -652,6 +687,7 @@ Examples:
 				itemsPerIteration: params.itemsPerIteration ?? 0,
 				reflectEvery: params.reflectEvery ?? 0,
 				reflectInstructions: DEFAULT_REFLECT_INSTRUCTIONS,
+				endInstructions: params.endInstructions ?? "",
 				active: true,
 				status: "active",
 				startedAt: new Date().toISOString(),

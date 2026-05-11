@@ -13,7 +13,8 @@ ralph_start({
   taskContent: "# Task\n\n## Goals\n- Goal 1\n\n## Checklist\n- [ ] Item 1\n- [ ] Item 2",
   maxIterations: 50,        // Default: 50
   itemsPerIteration: 3,     // Optional: suggest N items per turn
-  reflectEvery: 10          // Optional: reflect every N iterations
+  reflectEvery: 10,         // Optional: reflect every N iterations
+  endInstructions: "Commit, push, and summarize." // Optional: reveal only after loop completion
 })
 ```
 
@@ -25,7 +26,8 @@ ralph_start({
 4. Call `ralph_done` to proceed to the next iteration only after real progress and only when another useful unblocked iteration should run now.
 5. If async subagents, chains, or background tools are pending and the next useful checklist item depends on their result, do **not** call `ralph_done` just to poll or spin. Record pending run IDs/status in the task file, then end the turn or use a watcher such as `return_on`.
 6. Output `<promise>COMPLETE</promise>` when finished.
-7. Stop when complete or when max iterations is reached (default 50).
+7. If the loop was started with `endInstructions`, those instructions are intentionally not shown during normal iterations; Ralph reveals them only after the loop completes/ends.
+8. Stop when complete or when max iterations is reached (default 50).
 
 ## User Commands
 

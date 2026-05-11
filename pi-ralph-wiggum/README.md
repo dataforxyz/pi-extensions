@@ -42,6 +42,7 @@ You ask Pi to set up a ralph-wiggum loop.
   2. How many items to process per iteration
   3. How often to commit
   4. (optionally) After how many items it should take a step back and self-reflect
+  5. (optionally) End-of-loop instructions that should be hidden until the loop reports completion
 - Pi runs `ralph_start`, beginning iteration 1.
   - It gets a prompt telling it to work on unblocked task items, update the task file, and call `ralph_done` only when another useful unblocked iteration should run now.
   - If it launches async subagents/chains/background tools and the next useful work depends on their result, it records the pending run IDs/status in the task file and stops/ends the turn or uses a watcher instead of spinning iterations.
@@ -74,6 +75,8 @@ If you hit `esc`, you can run `/ralph-stop` to clear the loop. Alternatively, ju
 | `--max-iterations N` | Stop after N iterations (default 50) |
 | `--items-per-iteration N` | Suggest N items per turn (prompt hint) |
 | `--reflect-every N` | Reflect every N iterations |
+| `--end-instructions "TEXT"` | Store instructions that are revealed only after the loop ends/completes |
+| `--end-instructions-file PATH` | Read completion-only instructions from a file |
 
 ## Agent Tool
 
@@ -85,9 +88,16 @@ ralph_start({
   taskContent: "# Task\n\n## Checklist\n- [ ] Item 1",
   maxIterations: 50,
   itemsPerIteration: 3,
-  reflectEvery: 10
+  reflectEvery: 10,
+  endInstructions: "Commit, push, and summarize the final result."
 })
 ```
+
+## End-of-loop instructions
+
+`endInstructions` are stored in Ralph state, not inserted into normal iteration prompts or the task file. When the assistant emits `<promise>COMPLETE</promise>` or the loop otherwise ends through Ralph completion handling, the extension sends a follow-up message with the hidden instructions so the assistant reads them only at the end.
+
+Use this for final-only actions like commit/push, cleanup, final reports, publishing, or notifications that would distract the loop if repeated every iteration.
 
 ## Credits
 
