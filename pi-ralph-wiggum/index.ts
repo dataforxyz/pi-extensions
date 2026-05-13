@@ -57,6 +57,9 @@ interface LoopState {
 	completedAt?: string;
 	lastReflectionAt: number; // Last iteration we reflected at
 	continuationQueued?: boolean; // True while a Ralph continuation prompt is already queued
+	ownerSessionId?: string; // Pi session that explicitly started/resumed this loop
+	ownerSessionFile?: string; // Session file for diagnostics/status output
+	ownerStartedAt?: string; // When the current owner claimed the loop
 }
 
 const STATUS_ICONS: Record<LoopStatus, string> = { active: "▶", paused: "⏸", completed: "✓" };
@@ -102,6 +105,40 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			return 0;
 		}
+	}
+
+	function getSessionId(ctx: ExtensionContext): string | undefined {
+		try {
+			return ctx.sessionManager.getSessionId();
+		} catch {
+			return undefined;
+		}
+	}
+
+	function getSessionFile(ctx: ExtensionContext): string | undefined {
+		try {
+			return ctx.sessionManager.getSessionFile();
+		} catch {
+			return undefined;
+		}
+	}
+
+	function claimLoop(ctx: ExtensionContext, state: LoopState): void {
+		state.ownerSessionId = getSessionId(ctx);
+		state.ownerSessionFile = getSessionFile(ctx);
+		state.ownerStartedAt = new Date().toISOString();
+	}
+
+	function isOwnedByCurrentSession(ctx: ExtensionContext, state: LoopState): boolean {
+		const sessionId = getSessionId(ctx);
+		return !!sessionId && !!state.ownerSessionId && state.ownerSessionId === sessionId;
+	}
+
+	function formatOwner(ctx: ExtensionContext, state: LoopState): string {
+		if (isOwnedByCurrentSession(ctx, state)) return "this session";
+		if (!state.ownerSessionId) return "unclaimed/legacy";
+		const file = state.ownerSessionFile ? path.basename(state.ownerSessionFile) : undefined;
+		return file ? `other session (${file})` : `other session (${state.ownerSessionId.slice(0, 8)})`;
 	}
 
 	function tryRemoveDir(dirPath: string): boolean {
@@ -202,10 +239,10 @@ ${instructions}`;
 
 	// --- UI ---
 
-	function formatLoop(l: LoopState): string {
+	function formatLoop(ctx: ExtensionContext, l: LoopState): string {
 		const status = `${STATUS_ICONS[l.status]} ${l.status}`;
 		const iter = l.maxIterations > 0 ? `${l.iteration}/${l.maxIterations}` : `${l.iteration}`;
-		return `${l.name}: ${status} (iteration ${iter})`;
+		return `${l.name}: ${status} (iteration ${iter}, owner: ${formatOwner(ctx, l)})`;
 	}
 
 	function updateUI(ctx: ExtensionContext): void {
@@ -342,7 +379,10 @@ ${instructions}`;
 
 			const existing = loadState(ctx, loopName);
 			if (existing?.status === "active") {
-				ctx.ui.notify(`Loop "${loopName}" is already active. Use /ralph resume ${loopName}`, "warning");
+				ctx.ui.notify(
+					`Loop "${loopName}" is already active (owner: ${formatOwner(ctx, existing)}). Use /ralph resume ${loopName} to explicitly claim it.`,
+					"warning",
+				);
 				return;
 			}
 
@@ -368,6 +408,7 @@ ${instructions}`;
 				lastReflectionAt: 0,
 				continuationQueued: false,
 			};
+			claimLoop(ctx, state);
 
 			saveState(ctx, state);
 			currentLoop = loopName;
@@ -385,19 +426,23 @@ ${instructions}`;
 
 		stop(_rest, ctx) {
 			if (!currentLoop) {
-				// Check persisted state for any active loop
-				const active = listLoops(ctx).find((l) => l.status === "active");
+				// Only stop loops explicitly owned by this Pi session.
+				const active = listLoops(ctx).find((l) => l.status === "active" && isOwnedByCurrentSession(ctx, l));
 				if (active) {
 					pauseLoop(ctx, active, `Paused Ralph loop: ${active.name} (iteration ${active.iteration})`);
 				} else {
-					ctx.ui.notify("No active Ralph loop", "warning");
+					ctx.ui.notify("No active Ralph loop owned by this session. Use /ralph resume <name> to claim one.", "warning");
 				}
 				return;
 			}
 			const state = loadState(ctx, currentLoop);
-			if (state) {
+			if (state && isOwnedByCurrentSession(ctx, state)) {
 				pauseLoop(ctx, state, `Paused Ralph loop: ${currentLoop} (iteration ${state.iteration})`);
+				return;
 			}
+			currentLoop = null;
+			updateUI(ctx);
+			ctx.ui.notify("No active Ralph loop owned by this session. Use /ralph resume <name> to claim one.", "warning");
 		},
 
 		resume(rest, ctx) {
@@ -417,20 +462,23 @@ ${instructions}`;
 				return;
 			}
 
-			// Pause current loop if different
+			// Pause only the currently owned loop if switching to a different loop.
 			if (currentLoop && currentLoop !== loopName) {
 				const curr = loadState(ctx, currentLoop);
-				if (curr) pauseLoop(ctx, curr);
+				if (curr && isOwnedByCurrentSession(ctx, curr)) pauseLoop(ctx, curr);
+				else currentLoop = null;
 			}
 
+			const previousOwner = formatOwner(ctx, state);
 			state.status = "active";
 			state.active = true;
 			state.iteration++;
+			claimLoop(ctx, state);
 			saveState(ctx, state);
 			currentLoop = loopName;
 			updateUI(ctx);
 
-			ctx.ui.notify(`Resumed: ${loopName} (iteration ${state.iteration})`, "info");
+			ctx.ui.notify(`Resumed/claimed: ${loopName} (iteration ${state.iteration}, previous owner: ${previousOwner})`, "info");
 
 			const content = tryRead(path.resolve(ctx.cwd, state.taskFile));
 			if (!content) {
@@ -451,7 +499,7 @@ ${instructions}`;
 				ctx.ui.notify("No Ralph loops found.", "info");
 				return;
 			}
-			ctx.ui.notify(`Ralph loops:\n${loops.map((l) => formatLoop(l)).join("\n")}`, "info");
+			ctx.ui.notify(`Ralph loops:\n${loops.map((l) => formatLoop(ctx, l)).join("\n")}`, "info");
 		},
 
 		cancel(rest, ctx) {
@@ -539,7 +587,7 @@ ${instructions}`;
 			}
 
 			const label = archived ? "Archived loops" : "Ralph loops";
-			ctx.ui.notify(`${label}:\n${loops.map((l) => formatLoop(l)).join("\n")}`, "info");
+			ctx.ui.notify(`${label}:\n${loops.map((l) => formatLoop(ctx, l)).join("\n")}`, "info");
 		},
 
 		nuke(rest, ctx) {
@@ -629,10 +677,12 @@ Examples:
 			}
 
 			let state = currentLoop ? loadState(ctx, currentLoop) : null;
-			if (!state) {
-				const active = listLoops(ctx).find((l) => l.status === "active");
+			if (!state || !isOwnedByCurrentSession(ctx, state)) {
+				const active = listLoops(ctx).find((l) => l.status === "active" && isOwnedByCurrentSession(ctx, l));
 				if (!active) {
-					if (ctx.hasUI) ctx.ui.notify("No active Ralph loop", "warning");
+					currentLoop = null;
+					updateUI(ctx);
+					if (ctx.hasUI) ctx.ui.notify("No active Ralph loop owned by this session. Use /ralph resume <name> to claim one.", "warning");
 					return;
 				}
 				state = active;
@@ -671,8 +721,17 @@ Examples:
 			const loopName = sanitize(params.name);
 			const taskFile = path.join(RALPH_DIR, `${loopName}.md`);
 
-			if (loadState(ctx, loopName)?.status === "active") {
-				return { content: [{ type: "text", text: `Loop "${loopName}" already active.` }], details: {} };
+			const existing = loadState(ctx, loopName);
+			if (existing?.status === "active") {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Loop "${loopName}" already active (owner: ${formatOwner(ctx, existing)}). Use /ralph resume ${loopName} to explicitly claim it.`,
+						},
+					],
+					details: {},
+				};
 			}
 
 			const fullPath = path.resolve(ctx.cwd, taskFile);
@@ -694,6 +753,7 @@ Examples:
 				lastReflectionAt: 0,
 				continuationQueued: false,
 			};
+			claimLoop(ctx, state);
 
 			saveState(ctx, state);
 			currentLoop = loopName;
@@ -730,6 +790,14 @@ Examples:
 			const state = loadState(ctx, currentLoop);
 			if (!state || state.status !== "active") {
 				return { content: [{ type: "text", text: "Ralph loop is not active." }], details: {} };
+			}
+			if (!isOwnedByCurrentSession(ctx, state)) {
+				currentLoop = null;
+				updateUI(ctx);
+				return {
+					content: [{ type: "text", text: `Ralph loop "${state.name}" is owned by ${formatOwner(ctx, state)}. Use /ralph resume ${state.name} to explicitly claim it.` }],
+					details: {},
+				};
 			}
 
 			// Do not gate on ctx.hasPendingMessages() here. Other extensions can
@@ -795,7 +863,11 @@ Examples:
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (!currentLoop) return;
 		const state = loadState(ctx, currentLoop);
-		if (!state || state.status !== "active") return;
+		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) {
+			currentLoop = null;
+			updateUI(ctx);
+			return;
+		}
 
 		const iterStr = `${state.iteration}${state.maxIterations > 0 ? `/${state.maxIterations}` : ""}`;
 		if (event.prompt.includes(`🔄 RALPH LOOP: ${state.name} | Iteration ${state.iteration}`) && state.continuationQueued) {
@@ -819,7 +891,11 @@ Examples:
 	pi.on("agent_end", async (event, ctx) => {
 		if (!currentLoop) return;
 		const state = loadState(ctx, currentLoop);
-		if (!state || state.status !== "active") return;
+		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) {
+			currentLoop = null;
+			updateUI(ctx);
+			return;
+		}
 
 		// Check for completion marker
 		const lastAssistant = [...event.messages].reverse().find((m) => m.role === "assistant");
@@ -860,14 +936,13 @@ Examples:
 
 	pi.on("session_start", async (_event, ctx) => {
 		const active = listLoops(ctx).filter((l) => l.status === "active");
+		const ownedActive = active.filter((l) => isOwnedByCurrentSession(ctx, l));
 
-		// Rehydrate currentLoop from disk. The module is re-initialized on
-		// session reload (including auto-compaction and /compact), which would
-		// otherwise leave `currentLoop` null and silently break ralph_done,
-		// agent_end, and before_agent_start. Pick the most-recently-updated
-		// active loop when there are multiple, using the state file mtime.
-		if (!currentLoop && active.length > 0) {
-			const mostRecent = active.reduce((best, candidate) => {
+		// Rehydrate only loops explicitly owned by this Pi session. This preserves
+		// reload/compaction continuity without letting a new Pi in the same cwd
+		// accidentally claim some other session's project-scoped .ralph state.
+		if (!currentLoop && ownedActive.length > 0) {
+			const mostRecent = ownedActive.reduce((best, candidate) => {
 				const bestMtime = safeMtimeMs(getPath(ctx, best.name, ".state.json"));
 				const candidateMtime = safeMtimeMs(getPath(ctx, candidate.name, ".state.json"));
 				return candidateMtime > bestMtime ? candidate : best;
@@ -877,9 +952,10 @@ Examples:
 
 		if (active.length > 0 && ctx.hasUI) {
 			const lines = active.map(
-				(l) => `  • ${l.name} (iteration ${l.iteration}${l.maxIterations > 0 ? `/${l.maxIterations}` : ""})`,
+				(l) =>
+					`  • ${l.name} (iteration ${l.iteration}${l.maxIterations > 0 ? `/${l.maxIterations}` : ""}, owner: ${formatOwner(ctx, l)})`,
 			);
-			ctx.ui.notify(`Active Ralph loops:\n${lines.join("\n")}\n\nUse /ralph resume <name> to continue`, "info");
+			ctx.ui.notify(`Active Ralph loops:\n${lines.join("\n")}\n\nUse /ralph resume <name> to explicitly claim one.`, "info");
 		}
 		updateUI(ctx);
 	});

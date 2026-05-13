@@ -31,16 +31,18 @@ ralph_start({
 
 ## User Commands
 
-- `/ralph start <name|path>` - Start a new loop.
-- `/ralph resume <name>` - Resume loop.
-- `/ralph stop` - Pause loop (when agent idle).
-- `/ralph-stop` - Stop active loop (idle only).
+- `/ralph start <name|path>` - Start a new loop and claim it for this Pi session.
+- `/ralph resume <name>` - Resume/explicitly claim a loop for this Pi session.
+- `/ralph stop` - Pause the current loop owned by this Pi session (when agent idle).
+- `/ralph-stop` - Stop active loop owned by this Pi session (idle only).
 - `/ralph status` - Show loops.
 - `/ralph list --archived` - Show archived loops.
 - `/ralph archive <name>` - Move loop to archive.
 - `/ralph clean [--all]` - Clean completed loops.
 - `/ralph cancel <name>` - Delete loop.
 - `/ralph nuke [--yes]` - Delete all .ralph data.
+
+Loop files live in project `.ralph/`, but active execution is Pi-session-owned. A new Pi in the same directory should list active loops without taking them over; use `/ralph resume <name>` to intentionally claim one.
 
 Press ESC to interrupt streaming, send a normal message to resume, and run `/ralph-stop` when idle to end the loop.
 

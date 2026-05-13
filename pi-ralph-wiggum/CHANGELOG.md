@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Active Ralph loops are now owned by the Pi session that starts/resumes them. Starting another Pi in the same directory lists existing active loops but no longer auto-claims them or injects their loop prompts; `/ralph resume <name>` explicitly claims a loop.
+
 ## [0.2.1] - 2026-05-07
 
 ### Changed

@@ -58,8 +58,8 @@ If you hit `esc`, you can run `/ralph-stop` to clear the loop. Alternatively, ju
 | Command | Description |
 |---------|-------------|
 | `/ralph start <name\|path>` | Start a new loop |
-| `/ralph resume <name>` | Resume a paused loop |
-| `/ralph stop` | Pause current loop |
+| `/ralph resume <name>` | Resume and explicitly claim a paused/active loop for this Pi session |
+| `/ralph stop` | Pause the current loop owned by this Pi session |
 | `/ralph-stop` | Stop active loop (idle only) |
 | `/ralph status` | Show all loops |
 | `/ralph list --archived` | Show archived loops |
@@ -77,6 +77,10 @@ If you hit `esc`, you can run `/ralph-stop` to clear the loop. Alternatively, ju
 | `--reflect-every N` | Reflect every N iterations |
 | `--end-instructions "TEXT"` | Store instructions that are revealed only after the loop ends/completes |
 | `--end-instructions-file PATH` | Read completion-only instructions from a file |
+
+## Session ownership
+
+Ralph loop files remain project-scoped under `.ralph/`, but active execution is Pi-session-owned. A new Pi opened in the same directory will list active loops without automatically claiming or injecting them into prompts. Use `/ralph resume <name>` when you intentionally want the current Pi session to take over a loop.
 
 ## Agent Tool
 
