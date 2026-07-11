@@ -224,7 +224,7 @@ ${instructions}`;
 		saveState(ctx, state);
 		currentLoop = null;
 		updateUI(ctx);
-		pi.sendUserMessage(banner + formatEndInstructions(state));
+		pi.sendUserMessage(banner + formatEndInstructions(state), { deliverAs: "followUp" });
 	}
 
 	function stopLoop(ctx: ExtensionContext, state: LoopState, message?: string): void {
@@ -421,7 +421,7 @@ ${instructions}`;
 			}
 			state.continuationQueued = true;
 			saveState(ctx, state);
-			pi.sendUserMessage(buildPrompt(state, content, false));
+			pi.sendUserMessage(buildPrompt(state, content, false), { deliverAs: "followUp" });
 		},
 
 		stop(_rest, ctx) {
@@ -490,7 +490,7 @@ ${instructions}`;
 				state.reflectEvery > 0 && state.iteration > 1 && (state.iteration - 1) % state.reflectEvery === 0;
 			state.continuationQueued = true;
 			saveState(ctx, state);
-			pi.sendUserMessage(buildPrompt(state, content, needsReflection));
+			pi.sendUserMessage(buildPrompt(state, content, needsReflection), { deliverAs: "followUp" });
 		},
 
 		status(_rest, ctx) {
