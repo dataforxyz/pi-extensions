@@ -14,6 +14,7 @@ Personal extensions for the [Pi coding agent](https://github.com/badlogic/pi-mon
 | [/paste](raw-paste/) | Paste editable text, not [paste #1 +21 lines]. Running `/paste` with optional keybinding |
 | [/code](code-actions/) | Pick code blocks or inline snippets from assistant messages to copy, insert, or run with `/code` |
 | [session-recap](session-recap/) | One-line recap above the editor when you refocus the terminal (or after idle). Keeps you in flow while multi-clauding |
+| [reload-runtime](reload-runtime/) | Safe self- and owning-manager-triggered runtime reloads with an out-of-context footer timestamp |
 | [arcade](arcade/) | Play minigames while your tests run: 👾 sPIce-invaders, 👻 picman, 🏓 ping, 🧩 tetris, 🍄 mario-not |
 
 ## Agent Skills
@@ -27,7 +28,7 @@ Personal extensions for the [Pi coding agent](https://github.com/badlogic/pi-mon
 ## Install (pi package manager)
 
 ```bash
-pi install git:github.com/tmustier/pi-extensions
+pi install git:github.com/dataforxyz/pi-extensions
 ```
 
 To enable only a subset, replace the package entry in `~/.pi/agent/settings.json` with a filtered one:
@@ -36,7 +37,7 @@ To enable only a subset, replace the package entry in `~/.pi/agent/settings.json
 {
   "packages": [
     {
-      "source": "git:github.com/tmustier/pi-extensions",
+      "source": "git:github.com/dataforxyz/pi-extensions",
       "extensions": ["files-widget/index.ts"]
     }
   ]
@@ -62,6 +63,7 @@ If you keep a local clone, add extensions to your `~/.pi/agent/settings.json`:
     "~/pi-extensions/raw-paste",
     "~/pi-extensions/code-actions",
     "~/pi-extensions/session-recap",
+    "~/pi-extensions/reload-runtime",
     "~/pi-extensions/usage-extension"
   ]
 }

@@ -1,4 +1,5 @@
-# Local harness/agent artifacts
+# Dependencies and local harness/agent artifacts
+**/node_modules/
 .ralph/
 .long-task-harness/
 .build/
