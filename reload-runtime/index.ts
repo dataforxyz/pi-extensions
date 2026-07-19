@@ -423,6 +423,7 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 			const confirmed = await ctx.ui.confirm(
 				"Manager requested runtime reload",
 				`${event.from.name ?? event.from.id} requested a Pi runtime reload. Allow it?`,
+				{ timeout: 30_000 },
 			);
 			if (!confirmed) {
 				sendReloadResult(event.from.id, {
@@ -524,11 +525,11 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 			const queuedAttemptId = args.trim().match(/^--queued=([a-f0-9-]+)$/i)?.[1];
 			if (queuedAttemptId) {
 				if (!pendingReload || pendingReload.attemptId !== queuedAttemptId) {
-					ctx.ui.notify("Ignored a stale queued reload command.", "warning");
+					if (ctx.hasUI) ctx.ui.notify("Ignored a stale queued reload command.", "warning");
 					return;
 				}
 			} else if (reloadQueued) {
-				ctx.ui.notify("A runtime reload is already queued.", "info");
+				if (ctx.hasUI) ctx.ui.notify("A runtime reload is already queued.", "info");
 				return;
 			}
 			const attempt: ReloadAttempt = {
@@ -590,6 +591,7 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 					target
 						? `Send a structured reload request to ${target}?`
 						: "Allow the agent to reload extensions and runtime resources?",
+					{ timeout: 30_000 },
 				);
 				if (!confirmed) {
 					return reloadToolResult("Runtime reload was declined.", {
