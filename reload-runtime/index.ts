@@ -344,7 +344,7 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 		if (reloadQueued) return false;
 		reloadQueued = true;
 		pendingReload = request;
-		pi.sendUserMessage(`/reload-runtime --queued=${request.attemptId}`, { deliverAs: "followUp" });
+		pi.sendUserMessage(`/reload-queue --execute=${request.attemptId}`, { deliverAs: "followUp" });
 		return true;
 	}
 
@@ -519,28 +519,34 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 	// session_start to cover the opposite extension load order and reloads.
 	registerControlTypes();
 
-	pi.registerCommand("reload-runtime", {
-		description: "Reload extensions, skills, prompts, themes, and context files",
+	pi.registerCommand("reload-queue", {
+		description: "Queue a runtime reload for the next safe follow-up boundary",
 		handler: async (args, ctx) => {
-			const queuedAttemptId = args.trim().match(/^--queued=([a-f0-9-]+)$/i)?.[1];
-			if (queuedAttemptId) {
-				if (!pendingReload || pendingReload.attemptId !== queuedAttemptId) {
-					if (ctx.hasUI) ctx.ui.notify("Ignored a stale queued reload command.", "warning");
-					return;
+			const executeAttemptId = args.trim().match(/^--execute=([a-f0-9-]+)$/i)?.[1];
+			if (!executeAttemptId) {
+				const queued = queueReload({
+					attemptId: randomUUID(),
+					source: "manual",
+					requestedAt: Date.now(),
+				});
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						queued
+							? "Runtime reload queued. Current work and earlier queued messages will finish first."
+							: "A runtime reload is already queued.",
+						"info",
+					);
 				}
-			} else if (reloadQueued) {
-				if (ctx.hasUI) ctx.ui.notify("A runtime reload is already queued.", "info");
+				return;
+			}
+			if (!pendingReload || pendingReload.attemptId !== executeAttemptId) {
+				if (ctx.hasUI) ctx.ui.notify("Ignored a stale queued reload command.", "warning");
 				return;
 			}
 			const attempt: ReloadAttempt = {
-				...(pendingReload ?? {
-					attemptId: randomUUID(),
-					source: "manual" as const,
-					requestedAt: Date.now(),
-				}),
+				...pendingReload,
 				sessionId: ctx.sessionManager.getSessionId(),
 			};
-			reloadQueued = true;
 			pi.appendEntry(ATTEMPT_ENTRY, attempt);
 			try {
 				await ctx.waitForIdle();
@@ -569,23 +575,10 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("reload-queue", {
-		description: "Queue a runtime reload for the next safe follow-up boundary",
-		handler: async (_args, ctx) => {
-			const queued = queueReload({
-				attemptId: randomUUID(),
-				source: "manual",
-				requestedAt: Date.now(),
-			});
-			if (ctx.hasUI) {
-				ctx.ui.notify(
-					queued
-						? "Runtime reload queued. Current work and earlier queued messages will finish first."
-						: "A runtime reload is already queued.",
-					"info",
-				);
-			}
-		},
+	pi.on("input", (event, ctx) => {
+		if (!event.text.trim().startsWith("/reload-runtime")) return;
+		if (ctx.hasUI) ctx.ui.notify("/reload-runtime was removed. Use Pi's /reload when idle or /reload-queue while busy.", "info");
+		return { action: "handled" };
 	});
 
 	pi.registerTool({

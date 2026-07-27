@@ -157,12 +157,12 @@ test("self reload queues a follow-up command and records only out-of-context sta
 	assert.equal(toolResult.details.queued, true);
 	assert.equal(first.sentUserMessages.length, 1);
 	const queuedCommand = String(first.sentUserMessages[0]?.content);
-	assert.match(queuedCommand, /^\/reload-runtime --queued=[a-f0-9-]+$/);
+	assert.match(queuedCommand, /^\/reload-queue --execute=[a-f0-9-]+$/);
 	assert.deepEqual(first.sentUserMessages[0]?.options, { deliverAs: "followUp" });
 
-	await first.commands.get("reload-runtime")!("", first.ctx);
+	await first.commands.get("reload-queue")!("", first.ctx);
 	assert.equal(first.reloads, 0, "a manual command must not race a queued follow-up into a double reload");
-	await first.commands.get("reload-runtime")!(queuedCommand.slice("/reload-runtime ".length), first.ctx);
+	await first.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), first.ctx);
 	assert.equal(first.reloads, 1);
 	assert.equal(customEntries(entries, "reload-runtime-attempt").length, 1);
 
@@ -179,12 +179,15 @@ test("manual reload queue waits for the follow-up boundary and is single-flight"
 	const harness = createHarness();
 	reloadRuntimeExtension(harness.pi as never);
 	await harness.emitLifecycle("session_start", { reason: "startup" });
+	assert.equal(harness.commands.has("reload-runtime"), false, "the internal executor must not be exposed as a slash command");
+	await harness.emitLifecycle("input", { text: "/reload-runtime", source: "interactive" });
+	assert.match(harness.notifications.at(-1)?.message ?? "", /was removed.*\/reload.*\/reload-queue/);
 
 	await harness.commands.get("reload-queue")!("", harness.ctx);
 	assert.equal(harness.reloads, 0);
 	assert.equal(harness.sentUserMessages.length, 1);
 	const queuedCommand = String(harness.sentUserMessages[0]?.content);
-	assert.match(queuedCommand, /^\/reload-runtime --queued=[a-f0-9-]+$/);
+	assert.match(queuedCommand, /^\/reload-queue --execute=[a-f0-9-]+$/);
 	assert.deepEqual(harness.sentUserMessages[0]?.options, { deliverAs: "followUp" });
 	assert.match(harness.notifications.at(-1)?.message ?? "", /Current work and earlier queued messages will finish first/);
 
@@ -192,7 +195,7 @@ test("manual reload queue waits for the follow-up boundary and is single-flight"
 	assert.equal(harness.sentUserMessages.length, 1, "duplicate queue requests must not schedule another reload");
 	assert.match(harness.notifications.at(-1)?.message ?? "", /already queued/);
 
-	await harness.commands.get("reload-runtime")!(queuedCommand.slice("/reload-runtime ".length), harness.ctx);
+	await harness.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), harness.ctx);
 	assert.equal(harness.reloads, 1);
 });
 
@@ -276,7 +279,7 @@ test("only the stable owning manager can queue a structured reload control", asy
 		});
 		await settle();
 		assert.equal(harness.sentUserMessages.length, 1);
-		assert.match(String(harness.sentUserMessages[0]?.content), /^\/reload-runtime --queued=[a-f0-9-]+$/);
+		assert.match(String(harness.sentUserMessages[0]?.content), /^\/reload-queue --execute=[a-f0-9-]+$/);
 		assert.deepEqual(harness.sentUserMessages[0]?.options, { deliverAs: "followUp" });
 		assert.equal(outbound.at(-1)?.control.data.status, "queued");
 	} finally {
@@ -306,7 +309,7 @@ test("a manager request receives completion only after the replacement runtime s
 		});
 		await settle();
 		const queuedCommand = String(first.sentUserMessages[0]?.content);
-		await first.commands.get("reload-runtime")!(queuedCommand.slice("/reload-runtime ".length), first.ctx);
+		await first.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), first.ctx);
 
 		const second = createHarness(entries);
 		reloadRuntimeExtension(second.pi as never);
@@ -349,7 +352,7 @@ test("reload failures persist failure state, notify the manager, and release sin
 		const queuedCommand = String(harness.sentUserMessages[0]?.content);
 		await assert.rejects(
 			async () => {
-				await harness.commands.get("reload-runtime")!(queuedCommand.slice("/reload-runtime ".length), harness.ctx);
+				await harness.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), harness.ctx);
 			},
 			/reload broke/,
 		);

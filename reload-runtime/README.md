@@ -2,8 +2,8 @@
 
 Safe runtime reloads for [Pi](https://github.com/earendil-works/pi):
 
-- `/reload-runtime` runs Pi's documented `ctx.reload()` flow.
-- `/reload-queue` schedules a reload for the next safe follow-up boundary without interrupting active work.
+- Pi's built-in `/reload` remains the direct operator command when the session is idle.
+- `/reload-queue` schedules that same runtime reload for the next safe follow-up boundary without interrupting active work.
 - `reload_runtime` lets an agent queue its own reload at the next safe follow-up boundary.
 - `reload_runtime({ target: "worker" })` sends a structured Agent Intercom control to a managed Pi worker without injecting the control into that worker's model context.
 - A footer status shows the last successful reload time and source.
@@ -43,11 +43,13 @@ To load only this extension from the collection, filter the package in `~/.pi/ag
 
 ### Manual reload
 
+Use Pi's built-in command when the session is idle:
+
 ```text
-/reload-runtime
+/reload
 ```
 
-The command waits for a safe idle boundary, calls `await ctx.reload()`, and treats reload as terminal for the old command frame.
+This extension deliberately does not expose a second direct-reload slash command.
 
 ### Operator-queued reload
 
@@ -57,7 +59,7 @@ While Pi is working, submit:
 /reload-queue
 ```
 
-The command schedules an internal follow-up reload. The active turn, tool calls, automatic continuations, and messages already ahead of the reload remain ordered and finish first. When Pi reaches the queued reload entry, the extension waits for the fully idle boundary, reloads extensions/resources, and then Pi continues with any later queued entries using the new runtime. Repeated queue requests collapse into one reload.
+The command schedules an internal, token-protected follow-up invocation of itself. The active turn, tool calls, automatic continuations, and messages already ahead of the reload remain ordered and finish first. When Pi reaches the queued reload entry, the extension waits for the fully idle boundary, reloads extensions/resources, and then Pi continues with any later queued entries using the new runtime. Repeated queue requests collapse into one reload.
 
 This is the explicit command form of Pi's normal message queue: Enter queues steering input and Alt+Enter queues follow-up input. Use Alt+Enter with `/reload-queue` when the reload should wait behind all currently queued work.
 
@@ -69,7 +71,7 @@ The model can call:
 reload_runtime({})
 ```
 
-In an interactive TUI, Pi asks for confirmation before the tool queues or sends a reload. Headless/RPC workers do not prompt. The tool queues an internal `/reload-runtime --queued=<attempt-id>` command with `deliverAs: "followUp"`; the attempt token prevents a manual command racing the queued follow-up from causing a second reload. It never calls `ctx.reload()` from a tool or event callback.
+In an interactive TUI, Pi asks for confirmation before the tool queues or sends a reload. Headless/RPC workers do not prompt. The tool queues an internal `/reload-queue --execute=<attempt-id>` command with `deliverAs: "followUp"`; the attempt token prevents a manual command racing the queued follow-up from causing a second reload. It never calls `ctx.reload()` from a tool or event callback.
 
 ### Manager-triggered worker reload
 
@@ -83,7 +85,7 @@ The request is transported as a structured control. On the worker:
 
 1. Agent Intercom durably consumes and acknowledges the control.
 2. This extension compares the broker-verified sender session ID with the worker's current orchestrator manager.
-3. An authorized request queues `/reload-runtime` as a follow-up command.
+3. An authorized request queues the private execution form of `/reload-queue` as a follow-up command.
 4. After the new runtime receives `session_start` with `reason: "reload"`, it records the successful timestamp and sends an asynchronous completion result to the manager.
 
 Manager ownership is resolved for every request. The extension reads the current orchestrator worker registry when visible and falls back to the stable manager session ID provided by the worker launcher. Names, CWD, model, PID, and message claims are never used for authorization.
