@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remove the redundant public `/reload-runtime` slash command. Operators now use Pi's built-in `/reload` when idle and `/reload-queue` while busy; the queue command carries its own private token-protected execution form.
 - Add `/reload-queue` for an operator to schedule a single-flight reload at Pi's next safe follow-up boundary without interrupting active work.
 
 ## 0.1.0
