@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add `/reload-queue` for an operator to schedule a single-flight reload at Pi's next safe follow-up boundary without interrupting active work.
+
 ## 0.1.0
 
 - Add `/reload-runtime` using Pi's documented `ctx.reload()` lifecycle.

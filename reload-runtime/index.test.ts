@@ -175,6 +175,27 @@ test("self reload queues a follow-up command and records only out-of-context sta
 	assert.equal(second.sentUserMessages.length, 0, "the footer marker must not create model context");
 });
 
+test("manual reload queue waits for the follow-up boundary and is single-flight", async () => {
+	const harness = createHarness();
+	reloadRuntimeExtension(harness.pi as never);
+	await harness.emitLifecycle("session_start", { reason: "startup" });
+
+	await harness.commands.get("reload-queue")!("", harness.ctx);
+	assert.equal(harness.reloads, 0);
+	assert.equal(harness.sentUserMessages.length, 1);
+	const queuedCommand = String(harness.sentUserMessages[0]?.content);
+	assert.match(queuedCommand, /^\/reload-runtime --queued=[a-f0-9-]+$/);
+	assert.deepEqual(harness.sentUserMessages[0]?.options, { deliverAs: "followUp" });
+	assert.match(harness.notifications.at(-1)?.message ?? "", /Current work and earlier queued messages will finish first/);
+
+	await harness.commands.get("reload-queue")!("", harness.ctx);
+	assert.equal(harness.sentUserMessages.length, 1, "duplicate queue requests must not schedule another reload");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /already queued/);
+
+	await harness.commands.get("reload-runtime")!(queuedCommand.slice("/reload-runtime ".length), harness.ctx);
+	assert.equal(harness.reloads, 1);
+});
+
 test("interactive agent reloads require confirmation and the disable flag fails closed", async () => {
 	const declined = createHarness([], { mode: "tui", confirm: false });
 	reloadRuntimeExtension(declined.pi as never);

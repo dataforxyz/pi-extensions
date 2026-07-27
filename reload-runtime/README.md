@@ -3,6 +3,7 @@
 Safe runtime reloads for [Pi](https://github.com/earendil-works/pi):
 
 - `/reload-runtime` runs Pi's documented `ctx.reload()` flow.
+- `/reload-queue` schedules a reload for the next safe follow-up boundary without interrupting active work.
 - `reload_runtime` lets an agent queue its own reload at the next safe follow-up boundary.
 - `reload_runtime({ target: "worker" })` sends a structured Agent Intercom control to a managed Pi worker without injecting the control into that worker's model context.
 - A footer status shows the last successful reload time and source.
@@ -48,6 +49,18 @@ To load only this extension from the collection, filter the package in `~/.pi/ag
 
 The command waits for a safe idle boundary, calls `await ctx.reload()`, and treats reload as terminal for the old command frame.
 
+### Operator-queued reload
+
+While Pi is working, submit:
+
+```text
+/reload-queue
+```
+
+The command schedules an internal follow-up reload. The active turn, tool calls, automatic continuations, and messages already ahead of the reload remain ordered and finish first. When Pi reaches the queued reload entry, the extension waits for the fully idle boundary, reloads extensions/resources, and then Pi continues with any later queued entries using the new runtime. Repeated queue requests collapse into one reload.
+
+This is the explicit command form of Pi's normal message queue: Enter queues steering input and Alt+Enter queues follow-up input. Use Alt+Enter with `/reload-queue` when the reload should wait behind all currently queued work.
+
 ### Agent self-reload
 
 The model can call:
@@ -78,7 +91,7 @@ Manager ownership is resolved for every request. The extension reads the current
 ## Safe-boundary behavior
 
 - Idle session: the queued command runs immediately.
-- Active agent/tool run: it waits until Pi reaches the next follow-up input boundary.
+- Active agent/tool run: `/reload-queue`, self-reload, and authorized manager reload all wait until Pi reaches the next follow-up input boundary.
 - Stuck run/tool: it remains queued until the run completes or is aborted.
 - Multiple simultaneous requests: only one reload is queued; later requests are rejected.
 

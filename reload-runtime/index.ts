@@ -569,6 +569,25 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("reload-queue", {
+		description: "Queue a runtime reload for the next safe follow-up boundary",
+		handler: async (_args, ctx) => {
+			const queued = queueReload({
+				attemptId: randomUUID(),
+				source: "manual",
+				requestedAt: Date.now(),
+			});
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					queued
+						? "Runtime reload queued. Current work and earlier queued messages will finish first."
+						: "A runtime reload is already queued.",
+					"info",
+				);
+			}
+		},
+	});
+
 	pi.registerTool({
 		name: "reload_runtime",
 		label: "Reload Runtime",
