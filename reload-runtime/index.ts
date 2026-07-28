@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -261,10 +261,19 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 		return !Boolean(pi.getFlag("reload-runtime-disable-manager"));
 	}
 
-	function confirmationEnabled(ctx: ExtensionContext): boolean {
+	function isInteractiveTui(ctx: ExtensionContext): boolean {
 		const mode = (ctx as ExtensionContext & { mode?: string }).mode;
-		const interactive = mode ? mode === "tui" : ctx.hasUI;
-		return interactive && !Boolean(pi.getFlag("reload-runtime-no-confirm"));
+		return mode ? mode === "tui" : ctx.hasUI;
+	}
+
+	function confirmationEnabled(ctx: ExtensionContext): boolean {
+		return isInteractiveTui(ctx) && !Boolean(pi.getFlag("reload-runtime-no-confirm"));
+	}
+
+	function prepareOperatorReload(ctx: ExtensionContext): boolean {
+		if (!isInteractiveTui(ctx) || ctx.ui.getEditorText().trim()) return false;
+		ctx.ui.setEditorText("/reload-queue");
+		return true;
 	}
 
 	function registerControlTypes(): void {
@@ -340,12 +349,45 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 		return delivery;
 	}
 
-	function queueReload(request: PendingReload): boolean {
+	function stageReload(request: PendingReload): boolean {
 		if (reloadQueued) return false;
 		reloadQueued = true;
 		pendingReload = request;
-		pi.sendUserMessage(`/reload-queue --execute=${request.attemptId}`, { deliverAs: "followUp" });
 		return true;
+	}
+
+	async function executePendingReload(ctx: ExtensionCommandContext): Promise<void> {
+		const request = pendingReload;
+		if (!request) return;
+		const attempt: ReloadAttempt = {
+			...request,
+			sessionId: ctx.sessionManager.getSessionId(),
+		};
+		pi.appendEntry(ATTEMPT_ENTRY, attempt);
+		try {
+			await ctx.waitForIdle();
+			await ctx.reload();
+			return;
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			pi.appendEntry(COMPLETION_ENTRY, {
+				attemptId: attempt.attemptId,
+				status: "failed",
+				timestamp: Date.now(),
+				reason,
+			} satisfies ReloadCompletion);
+			if (attempt.source === "manager" && attempt.requestId && attempt.senderId) {
+				sendReloadResult(attempt.senderId, {
+					requestId: attempt.requestId,
+					status: "failed",
+					timestamp: Date.now(),
+					reason,
+				});
+			}
+			reloadQueued = false;
+			pendingReload = null;
+			throw error;
+		}
 	}
 
 	function showMarker(ctx: ExtensionContext, marker: ReloadMarker): void {
@@ -436,20 +478,22 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 			}
 			if (!runtimeContext || generation !== runtimeGeneration) return;
 		}
-		const queued = queueReload({
-			attemptId: randomUUID(),
-			source: "manager",
-			// Use the receiver's clock for reload-attempt freshness. The sender's
-			// timestamp is informational and must not control completion recovery.
-			requestedAt: Date.now(),
-			requestId: request.requestId,
-			senderId: event.from.id,
-		});
+		const prepared = prepareOperatorReload(ctx);
+		if (isInteractiveTui(ctx)) {
+			ctx.ui.notify(
+				prepared
+					? "Manager reload request prepared. Submit /reload-queue to execute it safely."
+					: "Manager requested a reload. Run /reload-queue when ready; the current editor text was preserved.",
+				"warning",
+			);
+		}
 		sendReloadResult(event.from.id, {
 			requestId: request.requestId,
-			status: queued ? "queued" : "rejected",
+			status: "rejected",
 			timestamp: Date.now(),
-			...(!queued ? { reason: "another reload is already queued" } : {}),
+			reason: prepared
+				? "automatic deferred reload is unavailable; /reload-queue was prepared for the operator"
+				: "automatic deferred reload is unavailable in this Pi version; run /reload-queue in the worker session",
 		});
 	}
 
@@ -520,58 +564,27 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 	registerControlTypes();
 
 	pi.registerCommand("reload-queue", {
-		description: "Queue a runtime reload for the next safe follow-up boundary",
+		description: "Wait for the current agent run to settle, then reload the runtime",
 		handler: async (args, ctx) => {
-			const executeAttemptId = args.trim().match(/^--execute=([a-f0-9-]+)$/i)?.[1];
-			if (!executeAttemptId) {
-				const queued = queueReload({
-					attemptId: randomUUID(),
-					source: "manual",
-					requestedAt: Date.now(),
-				});
+			if (args.trim()) {
 				if (ctx.hasUI) {
-					ctx.ui.notify(
-						queued
-							? "Runtime reload queued. Current work and earlier queued messages will finish first."
-							: "A runtime reload is already queued.",
-						"info",
-					);
+					ctx.ui.notify("/reload-queue no longer accepts internal execution arguments.", "warning");
 				}
 				return;
 			}
-			if (!pendingReload || pendingReload.attemptId !== executeAttemptId) {
-				if (ctx.hasUI) ctx.ui.notify("Ignored a stale queued reload command.", "warning");
+			const queued = stageReload({
+				attemptId: randomUUID(),
+				source: "manual",
+				requestedAt: Date.now(),
+			});
+			if (!queued) {
+				if (ctx.hasUI) ctx.ui.notify("A runtime reload is already waiting for the idle boundary.", "info");
 				return;
 			}
-			const attempt: ReloadAttempt = {
-				...pendingReload,
-				sessionId: ctx.sessionManager.getSessionId(),
-			};
-			pi.appendEntry(ATTEMPT_ENTRY, attempt);
-			try {
-				await ctx.waitForIdle();
-				await ctx.reload();
-				return;
-			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				pi.appendEntry(COMPLETION_ENTRY, {
-					attemptId: attempt.attemptId,
-					status: "failed",
-					timestamp: Date.now(),
-					reason,
-				} satisfies ReloadCompletion);
-				if (attempt.source === "manager" && attempt.requestId && attempt.senderId) {
-					sendReloadResult(attempt.senderId, {
-						requestId: attempt.requestId,
-						status: "failed",
-						timestamp: Date.now(),
-						reason,
-					});
-				}
-				reloadQueued = false;
-				pendingReload = null;
-				throw error;
+			if (ctx.hasUI) {
+				ctx.ui.notify("Runtime reload will run after the current agent work settles.", "info");
 			}
+			await executePendingReload(ctx);
 		},
 	});
 
@@ -584,13 +597,14 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "reload_runtime",
 		label: "Reload Runtime",
-		description: "Reload this Pi runtime, or request a managed Pi worker to reload by Intercom target",
-		promptSnippet: "Reload this Pi runtime or a managed Pi worker after changing extensions or runtime resources",
+		description: "Prepare a safe local runtime reload, or request operator-assisted reload on a managed Pi worker",
+		promptSnippet: "Prepare a local runtime reload or request operator-assisted reload on a managed Pi worker",
 		promptGuidelines: [
 			"Use reload_runtime only after extension, skill, prompt, theme, or context-file changes require a runtime reload.",
+			"After reload_runtime prepares a local reload, tell the operator to submit the prepared /reload-queue command.",
 		],
 		parameters: Type.Object({
-			target: Type.Optional(Type.String({ description: "Agent Intercom target; omit to reload this Pi session" })),
+			target: Type.Optional(Type.String({ description: "Agent Intercom target; omit to prepare a reload for this Pi session" })),
 		}),
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (!agentReloadEnabled()) {
@@ -599,7 +613,7 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 			const target = params.target?.trim();
 			if (confirmationEnabled(ctx)) {
 				const confirmed = await ctx.ui.confirm(
-					target ? "Request remote runtime reload" : "Reload this Pi runtime",
+					target ? "Request remote runtime reload" : "Prepare Pi runtime reload",
 					target
 						? `Send a structured reload request to ${target}?`
 						: "Allow the agent to reload extensions and runtime resources?",
@@ -616,15 +630,22 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 				}
 			}
 			if (!target) {
-				const queued = queueReload({
-					attemptId: randomUUID(),
-					source: "agent",
-					requestedAt: Date.now(),
-				});
+				if (!isInteractiveTui(ctx)) {
+					throw new Error("Automatic deferred reload is unavailable in this Pi version; run /reload-queue in the Pi session");
+				}
+				const prepared = prepareOperatorReload(ctx);
+				ctx.ui.notify(
+					prepared
+						? "Submit the prepared /reload-queue command to reload after current work settles."
+						: "Run /reload-queue when ready; the current editor text was preserved.",
+					"warning",
+				);
 				return reloadToolResult(
-					queued ? "Queued /reload-runtime as a follow-up command." : "A runtime reload is already queued.",
+					prepared
+						? "Prepared /reload-queue in the editor. The operator must submit it to start the safe reload."
+						: "The editor is not empty, so it was left unchanged. The operator must run /reload-queue to reload safely.",
 					{
-						queued,
+						queued: false,
 						target: "self",
 						requestId: null,
 						targetSessionId: null,
@@ -670,7 +691,7 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 			}
 			bufferedRemoteResults.delete(requestId);
 			return reloadToolResult(
-				`Reload control delivered to ${target}; completion will arrive asynchronously.`,
+				`Reload control delivered to ${target}; the worker result will arrive asynchronously.`,
 				{
 					queued: true,
 					requestId,

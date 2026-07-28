@@ -1,7 +1,7 @@
 {
   "name": "@dataforxyz/pi-reload-runtime",
   "version": "0.1.0",
-  "description": "Safe self- and manager-triggered Pi runtime reloads with an out-of-context footer timestamp.",
+  "description": "Safe operator-queued Pi runtime reloads with agent and manager request handling.",
   "license": "MIT",
   "keywords": [
     "pi-package",
