@@ -21,6 +21,8 @@ function createHarness(sharedEntries: CustomEntry[] = [], options: {
 	mode?: "tui" | "rpc" | "json" | "print";
 	confirm?: boolean;
 	reloadError?: Error;
+	waitForIdle?: Promise<void>;
+	editorText?: string;
 } = {}) {
 	const events = new EventEmitter();
 	const lifecycle = new Map<string, Array<(event: any, ctx: any) => unknown>>();
@@ -31,6 +33,7 @@ function createHarness(sharedEntries: CustomEntry[] = [], options: {
 	const statuses: Array<{ key: string; value: string | undefined }> = [];
 	const notifications: Array<{ message: string; level: string }> = [];
 	const confirmations: Array<{ title: string; message: string }> = [];
+	const editorTexts: string[] = [];
 	let reloads = 0;
 
 	const pi = {
@@ -78,6 +81,12 @@ function createHarness(sharedEntries: CustomEntry[] = [], options: {
 			notify(message: string, level: string) {
 				notifications.push({ message, level });
 			},
+			setEditorText(text: string) {
+				editorTexts.push(text);
+			},
+			getEditorText() {
+				return editorTexts.at(-1) ?? options.editorText ?? "";
+			},
 			async confirm(title: string, message: string) {
 				confirmations.push({ title, message });
 				return options.confirm ?? true;
@@ -87,7 +96,9 @@ function createHarness(sharedEntries: CustomEntry[] = [], options: {
 			getEntries: () => sharedEntries,
 			getSessionId: () => "session-worker",
 		},
-		waitForIdle: async () => undefined,
+		waitForIdle: async () => {
+			await options.waitForIdle;
+		},
 		reload: async () => {
 			reloads += 1;
 			if (options.reloadError) throw options.reloadError;
@@ -105,6 +116,7 @@ function createHarness(sharedEntries: CustomEntry[] = [], options: {
 		statuses,
 		notifications,
 		confirmations,
+		editorTexts,
 		get reloads() { return reloads; },
 		async emitLifecycle(name: string, event: unknown = {}) {
 			for (const handler of lifecycle.get(name) ?? []) await handler(event, ctx);
@@ -146,60 +158,56 @@ test("owning manager resolution follows the current orchestrator registry", asyn
 	}
 });
 
-test("self reload queues a follow-up command and records only out-of-context state", async () => {
-	const entries: CustomEntry[] = [];
-	const first = createHarness(entries);
-	reloadRuntimeExtension(first.pi as never);
-	await first.emitLifecycle("session_start", { reason: "startup" });
-
-	const tool = first.tools.find((candidate) => candidate.name === "reload_runtime");
-	const toolResult = await tool.execute("tool-1", {}, new AbortController().signal, undefined, first.ctx);
-	assert.equal(toolResult.details.queued, true);
-	assert.equal(first.sentUserMessages.length, 1);
-	const queuedCommand = String(first.sentUserMessages[0]?.content);
-	assert.match(queuedCommand, /^\/reload-queue --execute=[a-f0-9-]+$/);
-	assert.deepEqual(first.sentUserMessages[0]?.options, { deliverAs: "followUp" });
-
-	await first.commands.get("reload-queue")!("", first.ctx);
-	assert.equal(first.reloads, 0, "a manual command must not race a queued follow-up into a double reload");
-	await first.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), first.ctx);
-	assert.equal(first.reloads, 1);
-	assert.equal(customEntries(entries, "reload-runtime-attempt").length, 1);
-
-	const second = createHarness(entries);
-	reloadRuntimeExtension(second.pi as never);
-	await second.emitLifecycle("session_start", { reason: "reload" });
-	assert.equal(customEntries(entries, "reload-runtime-marker").length, 1);
-	assert.equal(customEntries(entries, "reload-runtime-completion").length, 1);
-	assert.match(second.statuses.at(-1)?.value ?? "", /^reload: .* · agent$/);
-	assert.equal(second.sentUserMessages.length, 0, "the footer marker must not create model context");
-});
-
-test("manual reload queue waits for the follow-up boundary and is single-flight", async () => {
-	const harness = createHarness();
+test("self reload prepares an operator command without injecting it into model context", async () => {
+	const harness = createHarness([], { mode: "tui" });
 	reloadRuntimeExtension(harness.pi as never);
 	await harness.emitLifecycle("session_start", { reason: "startup" });
-	assert.equal(harness.commands.has("reload-runtime"), false, "the internal executor must not be exposed as a slash command");
+
+	const tool = harness.tools.find((candidate) => candidate.name === "reload_runtime");
+	const toolResult = await tool.execute("tool-1", {}, new AbortController().signal, undefined, harness.ctx);
+	assert.equal(toolResult.details.queued, false);
+	assert.deepEqual(harness.editorTexts, ["/reload-queue"]);
+	assert.equal(harness.sentUserMessages.length, 0);
+	assert.match(toolResult.content[0]?.text ?? "", /operator must submit/i);
+});
+
+test("manual reload queue waits for idle directly without injecting a slash command", async () => {
+	let releaseIdle!: () => void;
+	const waitForIdle = new Promise<void>((resolve) => {
+		releaseIdle = resolve;
+	});
+	const harness = createHarness([], { waitForIdle });
+	reloadRuntimeExtension(harness.pi as never);
+	await harness.emitLifecycle("session_start", { reason: "startup" });
+	assert.equal(harness.commands.has("reload-runtime"), false, "the redundant direct command must stay hidden");
 	await harness.emitLifecycle("input", { text: "/reload-runtime", source: "interactive" });
 	assert.match(harness.notifications.at(-1)?.message ?? "", /was removed.*\/reload.*\/reload-queue/);
 
-	await harness.commands.get("reload-queue")!("", harness.ctx);
+	const reload = harness.commands.get("reload-queue")!("", harness.ctx);
+	await settle();
 	assert.equal(harness.reloads, 0);
-	assert.equal(harness.sentUserMessages.length, 1);
-	const queuedCommand = String(harness.sentUserMessages[0]?.content);
-	assert.match(queuedCommand, /^\/reload-queue --execute=[a-f0-9-]+$/);
-	assert.deepEqual(harness.sentUserMessages[0]?.options, { deliverAs: "followUp" });
-	assert.match(harness.notifications.at(-1)?.message ?? "", /Current work and earlier queued messages will finish first/);
+	assert.equal(harness.sentUserMessages.length, 0);
+	assert.equal(customEntries(harness.entries, "reload-runtime-attempt").length, 1);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /after the current agent work settles/);
 
-	await harness.commands.get("reload-queue")!("", harness.ctx);
-	assert.equal(harness.sentUserMessages.length, 1, "duplicate queue requests must not schedule another reload");
-	assert.match(harness.notifications.at(-1)?.message ?? "", /already queued/);
-
-	await harness.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), harness.ctx);
+	releaseIdle();
+	await reload;
 	assert.equal(harness.reloads, 1);
+
+	await harness.commands.get("reload-queue")!("--execute=stale", harness.ctx);
+	assert.equal(harness.reloads, 1);
+	assert.match(harness.notifications.at(-1)?.message ?? "", /no longer accepts internal execution arguments/);
 });
 
-test("interactive agent reloads require confirmation and the disable flag fails closed", async () => {
+test("interactive agent reloads require confirmation, preserve editor text, and fail closed", async () => {
+	const occupied = createHarness([], { mode: "tui", editorText: "draft" });
+	reloadRuntimeExtension(occupied.pi as never);
+	await occupied.emitLifecycle("session_start", { reason: "startup" });
+	const occupiedTool = occupied.tools.find((candidate) => candidate.name === "reload_runtime");
+	const occupiedResult = await occupiedTool.execute("occupied", {}, new AbortController().signal, undefined, occupied.ctx);
+	assert.equal(occupied.editorTexts.length, 0);
+	assert.match(occupiedResult.content[0]?.text ?? "", /editor is not empty/i);
+
 	const declined = createHarness([], { mode: "tui", confirm: false });
 	reloadRuntimeExtension(declined.pi as never);
 	await declined.emitLifecycle("session_start", { reason: "startup" });
@@ -220,7 +228,7 @@ test("interactive agent reloads require confirmation and the disable flag fails 
 	);
 });
 
-test("only the stable owning manager can queue a structured reload control", async () => {
+test("only the stable owning manager can request a structured reload control", async () => {
 	const previousManager = process.env.AGENT_INTERCOM_MANAGER_SESSION_ID;
 	process.env.AGENT_INTERCOM_MANAGER_SESSION_ID = "manager-stable-id";
 	const harness = createHarness();
@@ -278,26 +286,26 @@ test("only the stable owning manager can queue a structured reload control", asy
 			},
 		});
 		await settle();
-		assert.equal(harness.sentUserMessages.length, 1);
-		assert.match(String(harness.sentUserMessages[0]?.content), /^\/reload-queue --execute=[a-f0-9-]+$/);
-		assert.deepEqual(harness.sentUserMessages[0]?.options, { deliverAs: "followUp" });
-		assert.equal(outbound.at(-1)?.control.data.status, "queued");
+		assert.equal(harness.sentUserMessages.length, 0);
+		assert.equal(outbound.at(-1)?.control.data.status, "rejected");
+		assert.match(outbound.at(-1)?.control.data.reason, /automatic deferred reload is unavailable/);
 	} finally {
 		if (previousManager === undefined) delete process.env.AGENT_INTERCOM_MANAGER_SESSION_ID;
 		else process.env.AGENT_INTERCOM_MANAGER_SESSION_ID = previousManager;
 	}
 });
 
-test("a manager request receives completion only after the replacement runtime starts", async () => {
+test("an interactive manager request prepares the safe operator command", async () => {
 	const previousManager = process.env.AGENT_INTERCOM_MANAGER_SESSION_ID;
 	process.env.AGENT_INTERCOM_MANAGER_SESSION_ID = "manager-stable-id";
-	const entries: CustomEntry[] = [];
-	const first = createHarness(entries);
-	reloadRuntimeExtension(first.pi as never);
+	const harness = createHarness([], { mode: "tui" });
+	reloadRuntimeExtension(harness.pi as never);
+	const responses: any[] = [];
+	harness.pi.events.on(CONTROL_SEND_EVENT, (payload: unknown) => responses.push(payload));
 
 	try {
-		await first.emitLifecycle("session_start", { reason: "startup" });
-		first.pi.events.emit(CONTROL_RECEIVED_EVENT, {
+		await harness.emitLifecycle("session_start", { reason: "startup" });
+		harness.pi.events.emit(CONTROL_RECEIVED_EVENT, {
 			from: { id: "manager-stable-id", name: "manager" },
 			messageId: "manager-wire",
 			receivedAt: Date.now(),
@@ -308,64 +316,37 @@ test("a manager request receives completion only after the replacement runtime s
 			},
 		});
 		await settle();
-		const queuedCommand = String(first.sentUserMessages[0]?.content);
-		await first.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), first.ctx);
 
-		const second = createHarness(entries);
-		reloadRuntimeExtension(second.pi as never);
-		const responses: any[] = [];
-		second.pi.events.on(CONTROL_SEND_EVENT, (payload: unknown) => responses.push(payload));
-		await second.emitLifecycle("session_start", { reason: "reload" });
-		await settle();
-
-		assert.equal((customEntries(entries, "reload-runtime-marker").at(-1)?.data as any).source, "manager");
-		assert.equal(responses.at(-1)?.to, "manager-stable-id");
-		assert.equal(responses.at(-1)?.control.data.requestId, "manager-request");
-		assert.equal(responses.at(-1)?.control.data.status, "completed");
+		assert.deepEqual(harness.editorTexts, ["/reload-queue"]);
+		assert.equal(harness.sentUserMessages.length, 0);
+		assert.equal(responses.at(-1)?.control.data.status, "rejected");
+		assert.match(responses.at(-1)?.control.data.reason, /prepared for the operator/);
 	} finally {
 		if (previousManager === undefined) delete process.env.AGENT_INTERCOM_MANAGER_SESSION_ID;
 		else process.env.AGENT_INTERCOM_MANAGER_SESSION_ID = previousManager;
 	}
 });
 
-test("reload failures persist failure state, notify the manager, and release single-flight state", async () => {
-	const previousManager = process.env.AGENT_INTERCOM_MANAGER_SESSION_ID;
-	process.env.AGENT_INTERCOM_MANAGER_SESSION_ID = "manager-stable-id";
+test("reload failures persist failure state and release single-flight state", async () => {
 	const harness = createHarness([], { reloadError: new Error("reload broke") });
 	reloadRuntimeExtension(harness.pi as never);
-	const responses: any[] = [];
-	harness.pi.events.on(CONTROL_SEND_EVENT, (payload: unknown) => responses.push(payload));
+	await harness.emitLifecycle("session_start", { reason: "startup" });
 
-	try {
-		await harness.emitLifecycle("session_start", { reason: "startup" });
-		harness.pi.events.emit(CONTROL_RECEIVED_EVENT, {
-			from: { id: "manager-stable-id" },
-			messageId: "failure-wire",
-			receivedAt: Date.now(),
-			control: {
-				type: "reload-runtime.request",
-				version: 1,
-				data: { requestId: "failure-request", requestedAt: Date.now() },
-			},
-		});
-		await settle();
-		const queuedCommand = String(harness.sentUserMessages[0]?.content);
-		await assert.rejects(
-			async () => {
-				await harness.commands.get("reload-queue")!(queuedCommand.slice("/reload-queue ".length), harness.ctx);
-			},
-			/reload broke/,
-		);
-		assert.equal((customEntries(harness.entries, "reload-runtime-completion").at(-1)?.data as any).status, "failed");
-		assert.equal(responses.at(-1)?.control.data.status, "failed");
+	await assert.rejects(
+		async () => {
+			await harness.commands.get("reload-queue")!("", harness.ctx);
+		},
+		/reload broke/,
+	);
+	assert.equal((customEntries(harness.entries, "reload-runtime-completion").at(-1)?.data as any).status, "failed");
 
-		const tool = harness.tools.find((candidate) => candidate.name === "reload_runtime");
-		const retry = await tool.execute("retry", {}, new AbortController().signal, undefined, harness.ctx);
-		assert.equal(retry.details.queued, true);
-	} finally {
-		if (previousManager === undefined) delete process.env.AGENT_INTERCOM_MANAGER_SESSION_ID;
-		else process.env.AGENT_INTERCOM_MANAGER_SESSION_ID = previousManager;
-	}
+	await assert.rejects(
+		async () => {
+			await harness.commands.get("reload-queue")!("", harness.ctx);
+		},
+		/reload broke/,
+	);
+	assert.equal(customEntries(harness.entries, "reload-runtime-attempt").length, 2);
 });
 
 test("remote reload tool uses the generic control bus and records the resolved target", async () => {

@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Remove the redundant public `/reload-runtime` slash command. Operators now use Pi's built-in `/reload` when idle and `/reload-queue` while busy; the queue command carries its own private token-protected execution form.
-- Add `/reload-queue` for an operator to schedule a single-flight reload at Pi's next safe follow-up boundary without interrupting active work.
+- Fix `/reload-queue` leaking its private executor into model context. The command now waits for `ctx.waitForIdle()` and reloads directly from its command context without `pi.sendUserMessage()`.
+- Make agent- and manager-triggered reload requests fail safely or prepare `/reload-queue` for an interactive operator when the current Pi API cannot perform a deferred reload from tool/event context.
+- Remove the redundant public `/reload-runtime` slash command. Operators now use Pi's built-in `/reload` when idle and `/reload-queue` while busy.
+- Add `/reload-queue` for an operator to schedule a single-flight reload at Pi's next safe idle boundary without interrupting active work.
 
 ## 0.1.0
 
