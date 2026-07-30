@@ -53,6 +53,8 @@ You ask Pi to set up a ralph-wiggum loop.
   - You hit `esc` (pausing the loop)
 If you hit `esc`, you can run `/ralph-stop` to clear the loop. Alternatively, just tell Pi to continue to keep going.
 
+While a loop is active, Ralph uses a single compact line above the editor showing the loop name, status, and iteration. Run `/ralph status` to open the full loop details in a modal.
+
 ## Commands
 
 | Command | Description |
@@ -61,7 +63,7 @@ If you hit `esc`, you can run `/ralph-stop` to clear the loop. Alternatively, ju
 | `/ralph resume <name>` | Resume and explicitly claim a paused/active loop for this Pi session |
 | `/ralph stop` | Pause the current loop owned by this Pi session |
 | `/ralph-stop` | Stop active loop (idle only) |
-| `/ralph status` | Show all loops |
+| `/ralph status` | Open loop details (modal in the TUI) |
 | `/ralph list --archived` | Show archived loops |
 | `/ralph archive <name>` | Move loop to archive |
 | `/ralph clean [--all]` | Clean completed loops |

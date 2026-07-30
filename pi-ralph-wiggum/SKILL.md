@@ -35,7 +35,7 @@ ralph_start({
 - `/ralph resume <name>` - Resume/explicitly claim a loop for this Pi session.
 - `/ralph stop` - Pause the current loop owned by this Pi session (when agent idle).
 - `/ralph-stop` - Stop active loop owned by this Pi session (idle only).
-- `/ralph status` - Show loops.
+- `/ralph status` - Open loop details (modal in the TUI).
 - `/ralph list --archived` - Show archived loops.
 - `/ralph archive <name>` - Move loop to archive.
 - `/ralph clean [--all]` - Clean completed loops.

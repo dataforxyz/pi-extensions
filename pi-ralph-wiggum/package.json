@@ -24,9 +24,13 @@
     "image": "https://github.com/user-attachments/assets/68cdab11-76c6-4aed-9ea1-558cbb267ea6"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.74.0"
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-tui": "^0.74.0",
+    "typebox": "*"
   }
 }

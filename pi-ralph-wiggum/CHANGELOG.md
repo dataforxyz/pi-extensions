@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+- Replace the tall active-loop widget and duplicate footer status with a single compact line showing the loop name, status, and iteration.
+- Make `/ralph status` open full loop details in a dismissible TUI modal, with notification output retained for non-TUI modes.
+
 ### Fixed
 - Queue Ralph-injected user messages as follow-ups so completion banners and loop prompts no longer throw `Agent is already processing` when emitted from an active agent run.
 - Active Ralph loops are now owned by the Pi session that starts/resumes them. Starting another Pi in the same directory lists existing active loops but no longer auto-claims them or injects their loop prompts; `/ralph resume <name>` explicitly claims a loop.

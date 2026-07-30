@@ -5,8 +5,14 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import {
+	DynamicBorder,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { Container, matchesKey, Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 
 const RALPH_DIR = ".ralph";
 const COMPLETE_MARKER = "<promise>COMPLETE</promise>";
@@ -249,33 +255,77 @@ ${instructions}`;
 		if (!ctx.hasUI) return;
 
 		const state = currentLoop ? loadState(ctx, currentLoop) : null;
+		ctx.ui.setStatus("ralph", undefined);
 		if (!state) {
-			ctx.ui.setStatus("ralph", undefined);
 			ctx.ui.setWidget("ralph", undefined);
 			return;
 		}
 
 		const { theme } = ctx.ui;
 		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
+		const summary = [
+			theme.fg("accent", theme.bold("Ralph")),
+			theme.fg("muted", `· ${state.name}`),
+			theme.fg("dim", `· ${STATUS_ICONS[state.status]} ${state.iteration}${maxStr}`),
+			theme.fg("dim", "· /ralph status for details"),
+		].join(" ");
+		ctx.ui.setWidget("ralph", [summary]);
+	}
 
-		ctx.ui.setStatus("ralph", theme.fg("accent", `🔄 ${state.name} (${state.iteration}${maxStr})`));
-
+	function formatLoopDetails(ctx: ExtensionContext, state: LoopState): string {
+		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
 		const lines = [
-			theme.fg("accent", theme.bold("Ralph Wiggum")),
-			theme.fg("muted", `Loop: ${state.name}`),
-			theme.fg("dim", `Status: ${STATUS_ICONS[state.status]} ${state.status}`),
-			theme.fg("dim", `Iteration: ${state.iteration}${maxStr}`),
-			theme.fg("dim", `Task: ${state.taskFile}`),
+			`Loop: ${state.name}`,
+			`Status: ${STATUS_ICONS[state.status]} ${state.status}`,
+			`Iteration: ${state.iteration}${maxStr}`,
+			`Task: ${state.taskFile}`,
+			`Owner: ${formatOwner(ctx, state)}`,
+			`Started: ${state.startedAt}`,
 		];
 		if (state.reflectEvery > 0) {
 			const next = state.reflectEvery - ((state.iteration - 1) % state.reflectEvery);
-			lines.push(theme.fg("dim", `Next reflection in: ${next} iterations`));
+			lines.push(`Next reflection: ${next} iteration${next === 1 ? "" : "s"}`);
 		}
-		// Warning about stopping
-		lines.push("");
-		lines.push(theme.fg("warning", "ESC pauses the assistant"));
-		lines.push(theme.fg("warning", "Send a message to resume; /ralph-stop ends the loop"));
-		ctx.ui.setWidget("ralph", lines);
+		return lines.join("\n");
+	}
+
+	async function showStatus(ctx: ExtensionCommandContext): Promise<void> {
+		const loops = listLoops(ctx);
+		if (loops.length === 0) {
+			ctx.ui.notify("No Ralph loops found.", "info");
+			return;
+		}
+
+		const details = loops.map((state) => formatLoopDetails(ctx, state)).join("\n\n");
+		const mode = (ctx as ExtensionCommandContext & { mode?: string }).mode;
+		if (mode && mode !== "tui") {
+			ctx.ui.notify(`Ralph loops:\n${details}`, "info");
+			return;
+		}
+
+		await ctx.ui.custom(
+			(_tui, theme, _keybindings, done) => {
+				const container = new Container();
+				const border = new DynamicBorder((text: string) => theme.fg("accent", text));
+				container.addChild(border);
+				container.addChild(new Text(theme.fg("accent", theme.bold("Ralph Wiggum")), 1, 0));
+				container.addChild(new Text(theme.fg("muted", details), 1, 1));
+				container.addChild(new Text(theme.fg("dim", "Enter/Esc close · /ralph-stop ends the active loop"), 1, 0));
+				container.addChild(border);
+
+				return {
+					render: (width: number) => container.render(width),
+					invalidate: () => container.invalidate(),
+					handleInput: (data: string) => {
+						if (matchesKey(data, "enter") || matchesKey(data, "escape")) done(undefined);
+					},
+				};
+			},
+			{
+				overlay: true,
+				overlayOptions: { width: "70%", minWidth: 52, maxHeight: "80%", anchor: "center" },
+			},
+		);
 	}
 
 	// --- Prompt building ---
@@ -354,7 +404,7 @@ ${instructions}`;
 
 	// --- Commands ---
 
-	const commands: Record<string, (rest: string, ctx: ExtensionContext) => void> = {
+	const commands: Record<string, (rest: string, ctx: ExtensionCommandContext) => void | Promise<void>> = {
 		start(rest, ctx) {
 			const args = parseArgs(rest);
 			if (!args.name) {
@@ -493,13 +543,8 @@ ${instructions}`;
 			pi.sendUserMessage(buildPrompt(state, content, needsReflection), { deliverAs: "followUp" });
 		},
 
-		status(_rest, ctx) {
-			const loops = listLoops(ctx);
-			if (loops.length === 0) {
-				ctx.ui.notify("No Ralph loops found.", "info");
-				return;
-			}
-			ctx.ui.notify(`Ralph loops:\n${loops.map((l) => formatLoop(ctx, l)).join("\n")}`, "info");
+		async status(_rest, ctx) {
+			await showStatus(ctx);
 		},
 
 		cancel(rest, ctx) {
@@ -632,7 +677,7 @@ Commands:
   /ralph start <name|path> [options]  Start a new loop
   /ralph stop                         Pause current loop
   /ralph resume <name>                Resume a paused loop
-  /ralph status                       Show all loops
+  /ralph status                       Open loop details
   /ralph cancel <name>                Delete loop state
   /ralph archive <name>               Move loop to archive
   /ralph clean [--all]                Clean completed loops
@@ -659,7 +704,7 @@ Examples:
 			const [cmd] = args.trim().split(/\s+/);
 			const handler = commands[cmd];
 			if (handler) {
-				handler(args.slice(cmd.length).trim(), ctx);
+				await handler(args.slice(cmd.length).trim(), ctx);
 			} else {
 				ctx.ui.notify(HELP, "info");
 			}
