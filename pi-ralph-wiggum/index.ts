@@ -11,7 +11,7 @@ import {
 	type ExtensionCommandContext,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Container, matchesKey, Text } from "@earendil-works/pi-tui";
+import { Container, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const RALPH_DIR = ".ralph";
@@ -161,22 +161,47 @@ export default function (pi: ExtensionAPI) {
 	// --- State management ---
 
 	function migrateState(raw: Partial<LoopState> & { name: string }): LoopState {
-		if (!raw.status) raw.status = raw.active ? "active" : "paused";
+		const legacy = raw as Partial<LoopState> & {
+			reflectEveryItems?: number;
+			lastReflectionAtItems?: number;
+		};
+		if (!raw.reflectEvery && Number.isFinite(legacy.reflectEveryItems)) {
+			raw.reflectEvery = legacy.reflectEveryItems;
+		}
+		if (raw.lastReflectionAt === undefined && Number.isFinite(legacy.lastReflectionAtItems)) {
+			raw.lastReflectionAt = legacy.lastReflectionAtItems;
+		}
+
+		const validStatuses: LoopStatus[] = ["active", "paused", "completed"];
+		if (!raw.status || !validStatuses.includes(raw.status)) raw.status = raw.active ? "active" : "paused";
 		raw.active = raw.status === "active";
-		// Migrate old field names
-		if ("reflectEveryItems" in raw && !raw.reflectEvery) {
-			raw.reflectEvery = (raw as any).reflectEveryItems;
-		}
-		if ("lastReflectionAtItems" in raw && raw.lastReflectionAt === undefined) {
-			raw.lastReflectionAt = (raw as any).lastReflectionAtItems;
-		}
-		if (raw.endInstructions === undefined) raw.endInstructions = "";
+		raw.taskFile = typeof raw.taskFile === "string" ? raw.taskFile : path.join(RALPH_DIR, `${sanitize(raw.name)}.md`);
+		raw.iteration = Number.isFinite(raw.iteration) ? Math.max(1, Math.trunc(raw.iteration!)) : 1;
+		raw.maxIterations = Number.isFinite(raw.maxIterations) ? Math.max(0, Math.trunc(raw.maxIterations!)) : 50;
+		raw.itemsPerIteration = Number.isFinite(raw.itemsPerIteration) ? Math.max(0, Math.trunc(raw.itemsPerIteration!)) : 0;
+		raw.reflectEvery = Number.isFinite(raw.reflectEvery) ? Math.max(0, Math.trunc(raw.reflectEvery!)) : 0;
+		raw.reflectInstructions = typeof raw.reflectInstructions === "string" ? raw.reflectInstructions : DEFAULT_REFLECT_INSTRUCTIONS;
+		raw.endInstructions = typeof raw.endInstructions === "string" ? raw.endInstructions : "";
+		raw.startedAt = typeof raw.startedAt === "string" ? raw.startedAt : "";
+		raw.lastReflectionAt = Number.isFinite(raw.lastReflectionAt) ? Math.max(0, Math.trunc(raw.lastReflectionAt!)) : 0;
 		return raw as LoopState;
 	}
 
+	function parseState(content: string | null): LoopState | null {
+		if (!content) return null;
+		try {
+			const parsed: unknown = JSON.parse(content);
+			if (!parsed || typeof parsed !== "object") return null;
+			const raw = parsed as Partial<LoopState> & { name?: unknown };
+			if (typeof raw.name !== "string" || !raw.name.trim()) return null;
+			return migrateState(raw as Partial<LoopState> & { name: string });
+		} catch {
+			return null;
+		}
+	}
+
 	function loadState(ctx: ExtensionContext, name: string, archived = false): LoopState | null {
-		const content = tryRead(getPath(ctx, name, ".state.json", archived));
-		return content ? migrateState(JSON.parse(content)) : null;
+		return parseState(tryRead(getPath(ctx, name, ".state.json", archived)));
 	}
 
 	function saveState(ctx: ExtensionContext, state: LoopState, archived = false): void {
@@ -192,10 +217,7 @@ export default function (pi: ExtensionAPI) {
 		return fs
 			.readdirSync(dir)
 			.filter((f) => f.endsWith(".state.json"))
-			.map((f) => {
-				const content = tryRead(path.join(dir, f));
-				return content ? migrateState(JSON.parse(content)) : null;
-			})
+			.map((f) => parseState(tryRead(path.join(dir, f))))
 			.filter((s): s is LoopState => s !== null);
 	}
 
@@ -261,61 +283,81 @@ ${instructions}`;
 			return;
 		}
 
-		const { theme } = ctx.ui;
 		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
-		const summary = [
-			theme.fg("accent", theme.bold("Ralph")),
-			theme.fg("muted", `· ${state.name}`),
-			theme.fg("dim", `· ${STATUS_ICONS[state.status]} ${state.iteration}${maxStr}`),
-			theme.fg("dim", "· /ralph status for details"),
-		].join(" ");
-		ctx.ui.setWidget("ralph", [summary]);
+		ctx.ui.setWidget("ralph", (_tui, theme) => ({
+			render(width: number): string[] {
+				const summary = [
+					theme.fg("accent", theme.bold("Ralph")),
+					theme.fg("muted", `· ${state.name}`),
+					theme.fg("dim", `· ${STATUS_ICONS[state.status]} ${state.iteration}${maxStr}`),
+					theme.fg("dim", "· /ralph status"),
+				].join(" ");
+				return [truncateToWidth(summary, width, "…")];
+			},
+			invalidate() {},
+		}));
+	}
+
+	type LoopDetail = readonly [label: string, value: string];
+
+	function formatTimestamp(timestamp: string | undefined): string {
+		if (!timestamp) return "—";
+		const date = new Date(timestamp);
+		return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
+	}
+
+	function getLoopDetails(ctx: ExtensionContext, state: LoopState): LoopDetail[] {
+		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
+		const details: LoopDetail[] = [
+			["Loop", state.name],
+			["Status", `${STATUS_ICONS[state.status]} ${state.status}`],
+			["Iteration", `${state.iteration}${maxStr}`],
+			["Task", state.taskFile],
+			["Owner", formatOwner(ctx, state)],
+			["Started", formatTimestamp(state.startedAt)],
+		];
+		if (state.itemsPerIteration > 0) details.push(["Pacing", `~${state.itemsPerIteration} items per iteration`]);
+		if (state.reflectEvery > 0) {
+			const next = state.reflectEvery - ((state.iteration - 1) % state.reflectEvery);
+			details.push(["Next reflection", `${next} iteration${next === 1 ? "" : "s"}`]);
+		}
+		if (state.completedAt) details.push(["Completed", formatTimestamp(state.completedAt)]);
+		return details;
 	}
 
 	function formatLoopDetails(ctx: ExtensionContext, state: LoopState): string {
-		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
-		const lines = [
-			`Loop: ${state.name}`,
-			`Status: ${STATUS_ICONS[state.status]} ${state.status}`,
-			`Iteration: ${state.iteration}${maxStr}`,
-			`Task: ${state.taskFile}`,
-			`Owner: ${formatOwner(ctx, state)}`,
-			`Started: ${state.startedAt}`,
-		];
-		if (state.reflectEvery > 0) {
-			const next = state.reflectEvery - ((state.iteration - 1) % state.reflectEvery);
-			lines.push(`Next reflection: ${next} iteration${next === 1 ? "" : "s"}`);
-		}
-		return lines.join("\n");
+		return getLoopDetails(ctx, state)
+			.map(([label, value]) => `${label}: ${value}`)
+			.join("\n");
 	}
 
-	async function showStatus(ctx: ExtensionCommandContext): Promise<void> {
-		const loops = listLoops(ctx);
-		if (loops.length === 0) {
-			ctx.ui.notify("No Ralph loops found.", "info");
-			return;
-		}
-
-		const details = loops.map((state) => formatLoopDetails(ctx, state)).join("\n\n");
-		const mode = (ctx as ExtensionCommandContext & { mode?: string }).mode;
-		if (mode && mode !== "tui") {
-			ctx.ui.notify(`Ralph loops:\n${details}`, "info");
-			return;
-		}
-
+	async function showLoopDetails(ctx: ExtensionCommandContext, state: LoopState): Promise<void> {
+		const details = getLoopDetails(ctx, state);
 		await ctx.ui.custom(
 			(_tui, theme, _keybindings, done) => {
 				const container = new Container();
-				const border = new DynamicBorder((text: string) => theme.fg("accent", text));
-				container.addChild(border);
-				container.addChild(new Text(theme.fg("accent", theme.bold("Ralph Wiggum")), 1, 0));
-				container.addChild(new Text(theme.fg("muted", details), 1, 1));
-				container.addChild(new Text(theme.fg("dim", "Enter/Esc close · /ralph-stop ends the active loop"), 1, 0));
-				container.addChild(border);
+				const rebuild = () => {
+					container.clear();
+					container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+					container.addChild(new Text(theme.fg("accent", theme.bold(`Ralph · ${state.name}`)), 1, 0));
+					container.addChild(new Text("", 0, 0));
+					for (const [label, value] of details) {
+						container.addChild(
+							new Text(`${theme.fg("dim", `${label}:`)} ${theme.fg("text", value)}`, 1, 0),
+						);
+					}
+					const stopHint = state.status === "active" && isOwnedByCurrentSession(ctx, state) ? " · /ralph-stop ends loop" : "";
+					container.addChild(new Text(theme.fg("dim", `Enter/Esc close${stopHint}`), 1, 1));
+					container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+				};
+				rebuild();
 
 				return {
 					render: (width: number) => container.render(width),
-					invalidate: () => container.invalidate(),
+					invalidate: () => {
+						container.invalidate();
+						rebuild();
+					},
 					handleInput: (data: string) => {
 						if (matchesKey(data, "enter") || matchesKey(data, "escape")) done(undefined);
 					},
@@ -326,6 +368,44 @@ ${instructions}`;
 				overlayOptions: { width: "70%", minWidth: 52, maxHeight: "80%", anchor: "center" },
 			},
 		);
+	}
+
+	async function showStatus(ctx: ExtensionCommandContext, requestedName: string): Promise<void> {
+		const loops = listLoops(ctx).sort((a, b) => {
+			if (a.name === currentLoop) return -1;
+			if (b.name === currentLoop) return 1;
+			if (a.status === "active" && b.status !== "active") return -1;
+			if (b.status === "active" && a.status !== "active") return 1;
+			return b.startedAt.localeCompare(a.startedAt);
+		});
+		if (loops.length === 0) {
+			ctx.ui.notify("No Ralph loops found.", "info");
+			return;
+		}
+
+		let selected = requestedName ? loops.find((state) => state.name === requestedName) : undefined;
+		if (requestedName && !selected) {
+			ctx.ui.notify(`Loop "${requestedName}" not found`, "error");
+			return;
+		}
+
+		const mode = (ctx as ExtensionCommandContext & { mode?: string }).mode;
+		if (mode && mode !== "tui") {
+			const output = selected ? [selected] : loops;
+			ctx.ui.notify(`Ralph loops:\n${output.map((state) => formatLoopDetails(ctx, state)).join("\n\n")}`, "info");
+			return;
+		}
+
+		selected ??= currentLoop ? loops.find((state) => state.name === currentLoop) : undefined;
+		selected ??= loops.length === 1 ? loops[0] : undefined;
+
+		if (!selected) {
+			const choices = loops.map((state) => formatLoop(ctx, state));
+			const choice = await ctx.ui.select("Ralph loops", choices);
+			if (!choice) return;
+			selected = loops[choices.indexOf(choice)];
+		}
+		if (selected) await showLoopDetails(ctx, selected);
 	}
 
 	// --- Prompt building ---
@@ -543,8 +623,8 @@ ${instructions}`;
 			pi.sendUserMessage(buildPrompt(state, content, needsReflection), { deliverAs: "followUp" });
 		},
 
-		async status(_rest, ctx) {
-			await showStatus(ctx);
+		async status(rest, ctx) {
+			await showStatus(ctx, rest.trim());
 		},
 
 		cancel(rest, ctx) {
@@ -677,7 +757,7 @@ Commands:
   /ralph start <name|path> [options]  Start a new loop
   /ralph stop                         Pause current loop
   /ralph resume <name>                Resume a paused loop
-  /ralph status                       Open loop details
+  /ralph status [name]                Open loop details
   /ralph cancel <name>                Delete loop state
   /ralph archive <name>               Move loop to archive
   /ralph clean [--all]                Clean completed loops

@@ -3,8 +3,9 @@
 ## Unreleased
 
 ### Changed
-- Replace the tall active-loop widget and duplicate footer status with a single compact line showing the loop name, status, and iteration.
-- Make `/ralph status` open full loop details in a dismissible TUI modal, with notification output retained for non-TUI modes.
+- Replace the tall active-loop widget and duplicate footer status with a single width-safe line showing the loop name, status, and iteration.
+- Make `/ralph status [name]` open current or named loop details in a picker/modal flow, with notification output retained for non-TUI modes.
+- Ignore malformed Ralph state files instead of letting one corrupt JSON file break status listing or session startup.
 
 ### Fixed
 - Queue Ralph-injected user messages as follow-ups so completion banners and loop prompts no longer throw `Agent is already processing` when emitted from an active agent run.
