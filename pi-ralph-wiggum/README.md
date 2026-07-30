@@ -41,17 +41,17 @@ You ask Pi to set up a ralph-wiggum loop.
   1. What the task is and completion / tests to run
   2. How many items to process per iteration
   3. How often to commit
-  4. (optionally) After how many items it should take a step back and self-reflect
+  4. (optionally) After how many iterations it should take a step back and self-reflect
   5. (optionally) End-of-loop instructions that should be hidden until the loop reports completion
 - Pi runs `ralph_start`, beginning iteration 1.
-  - It gets a prompt telling it to work on unblocked task items, update the task file, and call `ralph_done` only when another useful unblocked iteration should run now.
-  - If it launches async subagents/chains/background tools and the next useful work depends on their result, it records the pending run IDs/status in the task file and stops/ends the turn or uses a watcher instead of spinning iterations.
-  - When an iteration has made real progress and is not blocked on pending async work, it calls `ralph_done`, resending the same prompt.
+  - Ralph sends a short continuation pointing to `.ralph/<name>.md`; it does not replay the full, growing task file into every iteration.
+  - The agent reads and updates that file, works on unblocked items, and calls `ralph_done` only when another useful iteration can start.
+  - If background work blocks the next item, it records what is pending and stops instead of burning iterations to poll.
 - Pi runs until either:
   - All tasks are done (Pi sends `<promise>COMPLETE</promise>`)
   - Max iterations (default 50)
   - You hit `esc` (pausing the loop)
-If you hit `esc`, you can run `/ralph-stop` to clear the loop. Alternatively, just tell Pi to continue to keep going.
+If you hit `esc`, you can run `/ralph-stop` to end the loop. Alternatively, tell Pi to continue.
 
 While a loop is active, Ralph uses a single width-safe line above the editor showing the loop name, status, and iteration. Run `/ralph status` to open the current loop's details, or `/ralph status <name>` for a specific loop. If there is no current loop and several are available, Ralph first opens a picker.
 
@@ -99,9 +99,11 @@ ralph_start({
 })
 ```
 
-## End-of-loop instructions
+## Prompt and completion behavior
 
-`endInstructions` are stored in Ralph state, not inserted into normal iteration prompts or the task file. When the assistant emits `<promise>COMPLETE</promise>` or the loop otherwise ends through Ralph completion handling, the extension sends a follow-up message with the hidden instructions so the assistant reads them only at the end.
+Normal continuation prompts are deliberately small: loop name, iteration, task-file path, and an optional reflection instruction. The task file remains the canonical working state instead of being duplicated into conversation history every iteration. If neither `read` nor `bash` is active, Ralph falls back to embedding a task snapshot so restricted/custom tool configurations still work. Ralph's active-loop system guidance is also kept concise.
+
+`endInstructions` are stored in Ralph state, not inserted into normal iteration prompts or the task file. When the assistant emits `<promise>COMPLETE</promise>` or the loop otherwise ends through Ralph completion handling, the extension sends a follow-up only when hidden end instructions actually exist. A normal completion without end instructions does not spend another model turn.
 
 Use this for final-only actions like commit/push, cleanup, final reports, publishing, or notifications that would distract the loop if repeated every iteration.
 

@@ -3,77 +3,63 @@ name: pi-ralph-wiggum
 description: Long-running iterative development loops with pacing control and verifiable progress. Use when tasks require multiple iterations, many discrete steps, or periodic reflection with clear checkpoints; avoid for simple one-shot tasks or quick fixes.
 ---
 
-# Ralph Wiggum - Long-Running Development Loops
+# Ralph Wiggum Loops
 
-Use the `ralph_start` tool to begin a loop:
+Start a loop with `ralph_start`:
 
-```
+```ts
 ralph_start({
   name: "loop-name",
-  taskContent: "# Task\n\n## Goals\n- Goal 1\n\n## Checklist\n- [ ] Item 1\n- [ ] Item 2",
-  maxIterations: 50,        // Default: 50
-  itemsPerIteration: 3,     // Optional: suggest N items per turn
-  reflectEvery: 10,         // Optional: reflect every N iterations
-  endInstructions: "Commit, push, and summarize." // Optional: reveal only after loop completion
+  taskContent: "# Task\n\n## Checklist\n- [ ] Item 1\n- [ ] Item 2",
+  maxIterations: 50,
+  itemsPerIteration: 3,
+  reflectEvery: 10,
+  endInstructions: "Commit, push, and summarize."
 })
 ```
 
-## Loop Behavior
+## Runtime contract
 
-1. **Write the task file**: Create `.ralph/<name>.md` with the task content. The tool does NOT create this file—you must write it yourself using the Write tool.
-2. Work on the task and update the file each iteration.
-3. Record verification evidence (commands run, file paths, outputs) in the task file.
-4. Call `ralph_done` to proceed to the next iteration only after real progress and only when another useful unblocked iteration should run now.
-5. If async subagents, chains, or background tools are pending and the next useful checklist item depends on their result, do **not** call `ralph_done` just to poll or spin. Record pending run IDs/status in the task file, then end the turn or use a watcher such as `return_on`.
-6. Output `<promise>COMPLETE</promise>` when finished.
-7. If the loop was started with `endInstructions`, those instructions are intentionally not shown during normal iterations; Ralph reveals them only after the loop completes/ends.
-8. Stop when complete or when max iterations is reached (default 50).
+1. `ralph_start` writes `taskContent` to `.ralph/<name>.md`. Treat that file as the canonical plan and progress record.
+2. At each iteration, read the task file, work on unblocked items, and update checklist, notes, and verification evidence.
+3. Call `ralph_done` only after real progress and only when another useful iteration can start immediately.
+4. If background work blocks the next item, record what is pending and stop. Do not spend iterations polling; use `return_on` when appropriate.
+5. When fully complete, emit `<promise>COMPLETE</promise>` instead of calling `ralph_done`.
+6. Resuming or reclaiming a loop does not consume an iteration.
+7. Continuation prompts reference the task file rather than replaying it into conversation history.
+8. `endInstructions`, when provided, remain hidden until completion.
 
-## User Commands
+## Commands
 
-- `/ralph start <name|path>` - Start a new loop and claim it for this Pi session.
-- `/ralph resume <name>` - Resume/explicitly claim a loop for this Pi session.
-- `/ralph stop` - Pause the current loop owned by this Pi session (when agent idle).
-- `/ralph-stop` - Stop active loop owned by this Pi session (idle only).
-- `/ralph status [name]` - Open current or named loop details (picker/modal in the TUI).
-- `/ralph list --archived` - Show archived loops.
-- `/ralph archive <name>` - Move loop to archive.
-- `/ralph clean [--all]` - Clean completed loops.
-- `/ralph cancel <name>` - Delete loop.
-- `/ralph nuke [--yes]` - Delete all .ralph data.
+- `/ralph start <name|path>` — start and claim a loop.
+- `/ralph resume <name>` — resume or explicitly claim a loop.
+- `/ralph stop` — pause the loop owned by this session.
+- `/ralph-stop` — end the owned active loop while idle.
+- `/ralph status [name]` — open current or named loop details.
+- `/ralph list --archived` — list archived loops.
+- `/ralph archive <name>` — archive a non-active loop.
+- `/ralph clean [--all]` — remove completed loop state, optionally task files.
+- `/ralph cancel <name>` — delete loop state.
+- `/ralph nuke [--yes]` — delete all project `.ralph` data.
 
-Loop files live in project `.ralph/`, but active execution is Pi-session-owned. A new Pi in the same directory should list active loops without taking them over; use `/ralph resume <name>` to intentionally claim one.
+Loop files are project-scoped, but execution ownership is Pi-session-scoped. A new session lists active loops without claiming them; use `/ralph resume <name>` to take over intentionally.
 
-Press ESC to interrupt streaming, send a normal message to resume, and run `/ralph-stop` when idle to end the loop.
+Press Esc to interrupt streaming. Send a normal message to continue, or run `/ralph-stop` while idle to end the loop.
 
-## Task File Format
+## Recommended task file
 
 ```markdown
-# Task Title
-
-Brief description.
+# Task title
 
 ## Goals
-- Goal 1
-- Goal 2
+- Goal
 
 ## Checklist
-- [ ] Item 1
-- [ ] Item 2
-- [x] Completed item
+- [ ] Work item
 
 ## Verification
-- Evidence, commands run, or file paths
+- Commands, outputs, and file paths
 
 ## Notes
-(Update with progress, decisions, blockers)
+- Decisions, progress, and blockers
 ```
-
-## Best Practices
-
-1. Write a clear checklist with discrete items.
-2. Update checklist and notes as you go.
-3. Capture verification evidence for completed items.
-4. When waiting on async agents/tools, park the loop instead of advancing iterations unless there is independent, non-conflicting work that adds value.
-5. Reflect when stuck to reassess approach.
-6. Output the completion marker only when truly done.

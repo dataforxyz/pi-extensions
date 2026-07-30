@@ -29,24 +29,27 @@ Describe your task here.
 - [ ] Item 1
 - [ ] Item 2
 
+## Verification
+- Commands, outputs, and file paths
+
 ## Notes
-(Update this as you work)
+- Progress, decisions, and blockers
 `;
 
-const DEFAULT_REFLECT_INSTRUCTIONS = `REFLECTION CHECKPOINT
-
-Pause and reflect on your progress:
-1. What has been accomplished so far?
-2. What's working well?
-3. What's not working or blocking progress?
-4. Should the approach be adjusted?
-5. What are the next priorities?
-
-Update the task file with your reflection, then continue working.`;
-
-const ASYNC_WAIT_INSTRUCTIONS = `Async/waiting rule: If async subagents, chains, or other background tools are pending and the next useful checklist item depends on their result, do not call ralph_done just to poll or spin. Record the pending run IDs/status and what you are waiting for in the task file, then stop/end the turn or use a watcher such as return_on. Continue the loop only when you can make independent, non-conflicting progress that adds value, or after the pending result is available and consumed.`;
+const DEFAULT_REFLECT_INSTRUCTIONS =
+	"Review progress, blockers, approach, and next priorities. Record the reflection in the task file before continuing.";
+const CONTINUATION_PREFIX = "[RALPH CONTINUE]";
 
 type LoopStatus = "active" | "paused" | "completed";
+
+interface RalphStartInput {
+	name: string;
+	taskContent: string;
+	itemsPerIteration?: number;
+	reflectEvery?: number;
+	maxIterations?: number;
+	endInstructions?: string;
+}
 
 interface LoopState {
 	name: string;
@@ -79,6 +82,15 @@ export default function (pi: ExtensionAPI) {
 	const archiveDir = (ctx: ExtensionContext) => path.join(ralphDir(ctx), "archive");
 	const sanitize = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_");
 
+	function normalizeLoopName(name: string): string | null {
+		const trimmed = name.trim();
+		return /[a-zA-Z0-9_-]/.test(trimmed) ? sanitize(trimmed) : null;
+	}
+
+	function nonNegativeInt(value: unknown, fallback: number): number {
+		return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : fallback;
+	}
+
 	function getPath(ctx: ExtensionContext, name: string, ext: string, archived = false): string {
 		const dir = archived ? archiveDir(ctx) : ralphDir(ctx);
 		return path.join(dir, `${sanitize(name)}${ext}`);
@@ -87,6 +99,11 @@ export default function (pi: ExtensionAPI) {
 	function ensureDir(filePath: string): void {
 		const dir = path.dirname(filePath);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+	}
+
+	function isWithinDir(parent: string, candidate: string): boolean {
+		const relative = path.relative(parent, candidate);
+		return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 	}
 
 	function tryDelete(filePath: string): void {
@@ -176,14 +193,14 @@ export default function (pi: ExtensionAPI) {
 		if (!raw.status || !validStatuses.includes(raw.status)) raw.status = raw.active ? "active" : "paused";
 		raw.active = raw.status === "active";
 		raw.taskFile = typeof raw.taskFile === "string" ? raw.taskFile : path.join(RALPH_DIR, `${sanitize(raw.name)}.md`);
-		raw.iteration = Number.isFinite(raw.iteration) ? Math.max(1, Math.trunc(raw.iteration!)) : 1;
-		raw.maxIterations = Number.isFinite(raw.maxIterations) ? Math.max(0, Math.trunc(raw.maxIterations!)) : 50;
-		raw.itemsPerIteration = Number.isFinite(raw.itemsPerIteration) ? Math.max(0, Math.trunc(raw.itemsPerIteration!)) : 0;
-		raw.reflectEvery = Number.isFinite(raw.reflectEvery) ? Math.max(0, Math.trunc(raw.reflectEvery!)) : 0;
+		raw.iteration = Math.max(1, nonNegativeInt(raw.iteration, 1));
+		raw.maxIterations = nonNegativeInt(raw.maxIterations, 50);
+		raw.itemsPerIteration = nonNegativeInt(raw.itemsPerIteration, 0);
+		raw.reflectEvery = nonNegativeInt(raw.reflectEvery, 0);
 		raw.reflectInstructions = typeof raw.reflectInstructions === "string" ? raw.reflectInstructions : DEFAULT_REFLECT_INSTRUCTIONS;
 		raw.endInstructions = typeof raw.endInstructions === "string" ? raw.endInstructions : "";
 		raw.startedAt = typeof raw.startedAt === "string" ? raw.startedAt : "";
-		raw.lastReflectionAt = Number.isFinite(raw.lastReflectionAt) ? Math.max(0, Math.trunc(raw.lastReflectionAt!)) : 0;
+		raw.lastReflectionAt = nonNegativeInt(raw.lastReflectionAt, 0);
 		return raw as LoopState;
 	}
 
@@ -207,8 +224,14 @@ export default function (pi: ExtensionAPI) {
 	function saveState(ctx: ExtensionContext, state: LoopState, archived = false): void {
 		state.active = state.status === "active";
 		const filePath = getPath(ctx, state.name, ".state.json", archived);
+		const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
 		ensureDir(filePath);
-		fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf-8");
+		try {
+			fs.writeFileSync(tempPath, JSON.stringify(state, null, 2), "utf-8");
+			fs.renameSync(tempPath, filePath);
+		} finally {
+			tryDelete(tempPath);
+		}
 	}
 
 	function listLoops(ctx: ExtensionContext, archived = false): LoopState[] {
@@ -225,44 +248,49 @@ export default function (pi: ExtensionAPI) {
 
 	function pauseLoop(ctx: ExtensionContext, state: LoopState, message?: string): void {
 		state.status = "paused";
-		state.active = false;
+		state.continuationQueued = false;
 		saveState(ctx, state);
-		currentLoop = null;
+		if (currentLoop === state.name) currentLoop = null;
 		updateUI(ctx);
 		if (message && ctx.hasUI) ctx.ui.notify(message, "info");
 	}
 
-	function formatEndInstructions(state: LoopState): string {
-		const instructions = state.endInstructions?.trim();
-		if (!instructions) return "";
-		return `
-
-───────────────────────────────────────────────────────────────────────
-📌 END-OF-LOOP INSTRUCTIONS
-───────────────────────────────────────────────────────────────────────
-These instructions were intentionally held back until the Ralph loop ended. Read and follow them now:
-
-${instructions}`;
-	}
-
-	function completeLoop(ctx: ExtensionContext, state: LoopState, banner: string): void {
+	function finalizeLoop(ctx: ExtensionContext, state: LoopState): void {
 		state.status = "completed";
 		state.completedAt = new Date().toISOString();
-		state.active = false;
+		state.continuationQueued = false;
 		saveState(ctx, state);
-		currentLoop = null;
+		if (currentLoop === state.name) currentLoop = null;
 		updateUI(ctx);
-		pi.sendUserMessage(banner + formatEndInstructions(state), { deliverAs: "followUp" });
+	}
+
+	function completeLoop(
+		ctx: ExtensionContext,
+		state: LoopState,
+		reason: string,
+		level: "info" | "warning" = "info",
+	): void {
+		finalizeLoop(ctx, state);
+		if (ctx.hasUI) ctx.ui.notify(`Ralph ${state.name}: ${reason}`, level);
+
+		const endInstructions = state.endInstructions.trim();
+		if (endInstructions) {
+			pi.sendUserMessage(`[Ralph ${state.name} finished: ${reason}]\n\n${endInstructions}`, {
+				deliverAs: "followUp",
+			});
+		}
 	}
 
 	function stopLoop(ctx: ExtensionContext, state: LoopState, message?: string): void {
-		state.status = "completed";
-		state.completedAt = new Date().toISOString();
-		state.active = false;
-		saveState(ctx, state);
-		currentLoop = null;
-		updateUI(ctx);
+		finalizeLoop(ctx, state);
 		if (message && ctx.hasUI) ctx.ui.notify(message, "info");
+	}
+
+	function pauseCurrentForSwitch(ctx: ExtensionContext, nextLoop: string): void {
+		if (!currentLoop || currentLoop === nextLoop) return;
+		const state = loadState(ctx, currentLoop);
+		if (state && state.status === "active" && isOwnedByCurrentSession(ctx, state)) pauseLoop(ctx, state);
+		else currentLoop = null;
 	}
 
 	// --- UI ---
@@ -273,10 +301,10 @@ ${instructions}`;
 		return `${l.name}: ${status} (iteration ${iter}, owner: ${formatOwner(ctx, l)})`;
 	}
 
-	function updateUI(ctx: ExtensionContext): void {
+	function updateUI(ctx: ExtensionContext, knownState?: LoopState | null): void {
 		if (!ctx.hasUI) return;
 
-		const state = currentLoop ? loadState(ctx, currentLoop) : null;
+		const state = knownState === undefined ? (currentLoop ? loadState(ctx, currentLoop) : null) : knownState;
 		ctx.ui.setStatus("ralph", undefined);
 		if (!state) {
 			ctx.ui.setWidget("ralph", undefined);
@@ -410,40 +438,49 @@ ${instructions}`;
 
 	// --- Prompt building ---
 
-	function buildPrompt(state: LoopState, taskContent: string, isReflection: boolean): string {
-		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
-		const header = `───────────────────────────────────────────────────────────────────────
-🔄 RALPH LOOP: ${state.name} | Iteration ${state.iteration}${maxStr}${isReflection ? " | 🪞 REFLECTION" : ""}
-───────────────────────────────────────────────────────────────────────`;
+	function buildPrompt(state: LoopState, isReflection: boolean, taskSnapshot?: string): string {
+		const iteration = `${state.iteration}${state.maxIterations > 0 ? `/${state.maxIterations}` : ""}`;
+		const lines = [
+			`${CONTINUATION_PREFIX} ${state.name} · iteration ${iteration}`,
+			taskSnapshot === undefined
+				? `Read ${state.taskFile}, then continue with the next unblocked work.`
+				: `No read-capable tool is active. Use this task snapshot and keep ${state.taskFile} updated:\n\n${taskSnapshot}`,
+		];
+		if (isReflection) lines.push(`Reflection: ${state.reflectInstructions}`);
+		return lines.join("\n");
+	}
 
-		const parts = [header, ""];
-		if (isReflection) parts.push(state.reflectInstructions, "\n---\n");
-
-		parts.push(`## Current Task (from ${state.taskFile})\n\n${taskContent}\n\n---`);
-		parts.push(`\n## Instructions\n`);
-		parts.push("User controls: ESC pauses the assistant. Send a message to resume. Run /ralph-stop when idle to stop the loop.\n");
-		parts.push(
-			`You are in a Ralph loop (iteration ${state.iteration}${state.maxIterations > 0 ? ` of ${state.maxIterations}` : ""}).\n`,
-		);
-
-		if (state.itemsPerIteration > 0) {
-			parts.push(`**THIS ITERATION: Process up to approximately ${state.itemsPerIteration} actionable items. Do not advance the loop just to wait on background work.**\n`);
-			parts.push(`1. Work on the next ~${state.itemsPerIteration} unblocked items from your checklist`);
-		} else {
-			parts.push(`1. Continue working on unblocked task items`);
+	function queueContinuation(ctx: ExtensionContext, state: LoopState, isReflection: boolean): boolean {
+		const taskPath = path.resolve(ctx.cwd, state.taskFile);
+		let activeTools: Set<string>;
+		try {
+			activeTools = new Set(pi.getActiveTools());
+		} catch {
+			// During early loader states, conservatively embed a snapshot.
+			activeTools = new Set();
 		}
-		parts.push(`2. Update the task file (${state.taskFile}) with your progress`);
-		parts.push(`3. ${ASYNC_WAIT_INSTRUCTIONS}`);
-		parts.push(`4. When FULLY COMPLETE, respond with: ${COMPLETE_MARKER}`);
-		parts.push(`5. Otherwise, call the ralph_done tool only after real progress, and only if another useful unblocked iteration should run now`);
 
-		return parts.join("\n");
+		let taskSnapshot: string | undefined;
+		try {
+			if (!fs.statSync(taskPath).isFile()) throw new Error("not a file");
+			if (!activeTools.has("read") && !activeTools.has("bash")) taskSnapshot = fs.readFileSync(taskPath, "utf-8");
+		} catch {
+			pauseLoop(ctx, state, `Paused Ralph loop: could not read task file ${state.taskFile}`);
+			return false;
+		}
+
+		state.continuationQueued = true;
+		saveState(ctx, state);
+		updateUI(ctx, state);
+		pi.sendUserMessage(buildPrompt(state, isReflection, taskSnapshot), { deliverAs: "followUp" });
+		return true;
 	}
 
 	// --- Arg parsing ---
 
 	function parseArgs(argsStr: string) {
-		const tokens = argsStr.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+		const unquote = (value: string) => value.replace(/^"|"$/g, "");
+		const tokens = (argsStr.match(/(?:[^\s"]+|"[^"]*")+/g) || []).map(unquote);
 		const result = {
 			name: "",
 			maxIterations: 50,
@@ -458,22 +495,22 @@ ${instructions}`;
 			const tok = tokens[i];
 			const next = tokens[i + 1];
 			if (tok === "--max-iterations" && next) {
-				result.maxIterations = parseInt(next, 10) || 0;
+				result.maxIterations = nonNegativeInt(Number(next), result.maxIterations);
 				i++;
 			} else if (tok === "--items-per-iteration" && next) {
-				result.itemsPerIteration = parseInt(next, 10) || 0;
+				result.itemsPerIteration = nonNegativeInt(Number(next), result.itemsPerIteration);
 				i++;
 			} else if (tok === "--reflect-every" && next) {
-				result.reflectEvery = parseInt(next, 10) || 0;
+				result.reflectEvery = nonNegativeInt(Number(next), result.reflectEvery);
 				i++;
 			} else if (tok === "--reflect-instructions" && next) {
-				result.reflectInstructions = next.replace(/^"|"$/g, "");
+				result.reflectInstructions = next;
 				i++;
 			} else if (tok === "--end-instructions" && next) {
-				result.endInstructions = next.replace(/^"|"$/g, "");
+				result.endInstructions = next;
 				i++;
 			} else if (tok === "--end-instructions-file" && next) {
-				result.endInstructionsFile = next.replace(/^"|"$/g, "");
+				result.endInstructionsFile = next;
 				i++;
 			} else if (!tok.startsWith("--")) {
 				result.name = tok;
@@ -504,7 +541,12 @@ ${instructions}`;
 			}
 
 			const isPath = args.name.includes("/") || args.name.includes("\\");
-			const loopName = isPath ? sanitize(path.basename(args.name, path.extname(args.name))) : args.name;
+			const rawLoopName = isPath ? path.basename(args.name, path.extname(args.name)) : args.name;
+			const loopName = normalizeLoopName(rawLoopName);
+			if (!loopName) {
+				ctx.ui.notify("Loop name must contain at least one letter, number, _ or -.", "warning");
+				return;
+			}
 			const taskFile = isPath ? args.name : path.join(RALPH_DIR, `${loopName}.md`);
 
 			const existing = loadState(ctx, loopName);
@@ -515,6 +557,8 @@ ${instructions}`;
 				);
 				return;
 			}
+
+			pauseCurrentForSwitch(ctx, loopName);
 
 			const fullPath = path.resolve(ctx.cwd, taskFile);
 			if (!fs.existsSync(fullPath)) {
@@ -534,24 +578,13 @@ ${instructions}`;
 				endInstructions: args.endInstructions,
 				active: true,
 				status: "active",
-				startedAt: existing?.startedAt || new Date().toISOString(),
+				startedAt: new Date().toISOString(),
 				lastReflectionAt: 0,
 				continuationQueued: false,
 			};
 			claimLoop(ctx, state);
-
-			saveState(ctx, state);
 			currentLoop = loopName;
-			updateUI(ctx);
-
-			const content = tryRead(fullPath);
-			if (!content) {
-				ctx.ui.notify(`Could not read task file: ${taskFile}`, "error");
-				return;
-			}
-			state.continuationQueued = true;
-			saveState(ctx, state);
-			pi.sendUserMessage(buildPrompt(state, content, false), { deliverAs: "followUp" });
+			queueContinuation(ctx, state, false);
 		},
 
 		stop(_rest, ctx) {
@@ -576,7 +609,7 @@ ${instructions}`;
 		},
 
 		resume(rest, ctx) {
-			const loopName = rest.trim();
+			const loopName = normalizeLoopName(rest);
 			if (!loopName) {
 				ctx.ui.notify("Usage: /ralph resume <name>", "warning");
 				return;
@@ -592,35 +625,15 @@ ${instructions}`;
 				return;
 			}
 
-			// Pause only the currently owned loop if switching to a different loop.
-			if (currentLoop && currentLoop !== loopName) {
-				const curr = loadState(ctx, currentLoop);
-				if (curr && isOwnedByCurrentSession(ctx, curr)) pauseLoop(ctx, curr);
-				else currentLoop = null;
-			}
+			pauseCurrentForSwitch(ctx, loopName);
 
 			const previousOwner = formatOwner(ctx, state);
 			state.status = "active";
-			state.active = true;
-			state.iteration++;
 			claimLoop(ctx, state);
-			saveState(ctx, state);
 			currentLoop = loopName;
-			updateUI(ctx);
 
+			if (!queueContinuation(ctx, state, false)) return;
 			ctx.ui.notify(`Resumed/claimed: ${loopName} (iteration ${state.iteration}, previous owner: ${previousOwner})`, "info");
-
-			const content = tryRead(path.resolve(ctx.cwd, state.taskFile));
-			if (!content) {
-				ctx.ui.notify(`Could not read task file: ${state.taskFile}`, "error");
-				return;
-			}
-
-			const needsReflection =
-				state.reflectEvery > 0 && state.iteration > 1 && (state.iteration - 1) % state.reflectEvery === 0;
-			state.continuationQueued = true;
-			saveState(ctx, state);
-			pi.sendUserMessage(buildPrompt(state, content, needsReflection), { deliverAs: "followUp" });
 		},
 
 		async status(rest, ctx) {
@@ -667,7 +680,7 @@ ${instructions}`;
 			if (fs.existsSync(srcState)) fs.renameSync(srcState, dstState);
 
 			const srcTask = path.resolve(ctx.cwd, state.taskFile);
-			if (srcTask.startsWith(ralphDir(ctx)) && !srcTask.startsWith(archiveDir(ctx))) {
+			if (isWithinDir(ralphDir(ctx), srcTask) && !isWithinDir(archiveDir(ctx), srcTask)) {
 				const dstTask = getPath(ctx, loopName, ".md", true);
 				if (fs.existsSync(srcTask)) fs.renameSync(srcTask, dstTask);
 			}
@@ -827,23 +840,33 @@ Examples:
 	pi.registerTool({
 		name: "ralph_start",
 		label: "Start Ralph Loop",
-		description: "Start a long-running development loop. Use for complex multi-iteration tasks.",
-		promptSnippet: "Start a persistent multi-iteration development loop with pacing and reflection controls.",
-		promptGuidelines: [
-			"Use this tool when the user explicitly wants an iterative loop, autonomous repeated passes, or paced multi-step execution.",
-			"After starting a loop, continue each finished iteration with ralph_done unless the completion marker has already been emitted or progress is blocked on pending async work.",
-			"If async subagents/tools are pending and their result is needed, record the run IDs/status in the task file and stop/end the turn or use a watcher instead of spinning Ralph.",
-		],
+		description: "Start a persistent, bounded development loop.",
+		promptSnippet: "Start a bounded multi-iteration development loop.",
 		parameters: Type.Object({
 			name: Type.String({ description: "Loop name (e.g., 'refactor-auth')" }),
 			taskContent: Type.String({ description: "Task in markdown with goals and checklist" }),
-			itemsPerIteration: Type.Optional(Type.Number({ description: "Suggest N items per turn (0 = no limit)" })),
-			reflectEvery: Type.Optional(Type.Number({ description: "Reflect every N iterations" })),
-			maxIterations: Type.Optional(Type.Number({ description: "Max iterations (default: 50)", default: 50 })),
-			endInstructions: Type.Optional(Type.String({ description: "Instructions to reveal only after the loop ends/completes; not included in normal iteration prompts" })),
+			itemsPerIteration: Type.Optional(Type.Integer({ minimum: 0, description: "Suggested items per iteration (0 = no limit)" })),
+			reflectEvery: Type.Optional(Type.Integer({ minimum: 0, description: "Reflect every N iterations (0 = disabled)" })),
+			maxIterations: Type.Optional(Type.Integer({ minimum: 0, description: "Maximum iterations (0 = unlimited)", default: 50 })),
+			endInstructions: Type.Optional(Type.String({ description: "Final-only instructions revealed after completion" })),
 		}),
+		prepareArguments(args): RalphStartInput {
+			if (!args || typeof args !== "object") return args as RalphStartInput;
+			const input = args as Record<string, unknown>;
+			const normalized = { ...input };
+			for (const key of ["itemsPerIteration", "reflectEvery", "maxIterations"] as const) {
+				if (typeof input[key] === "number") normalized[key] = nonNegativeInt(input[key], 0);
+			}
+			return normalized as unknown as RalphStartInput;
+		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const loopName = sanitize(params.name);
+			const loopName = normalizeLoopName(params.name);
+			if (!loopName) {
+				return {
+					content: [{ type: "text", text: "Loop name must contain at least one letter, number, _ or -." }],
+					details: {},
+				};
+			}
 			const taskFile = path.join(RALPH_DIR, `${loopName}.md`);
 
 			const existing = loadState(ctx, loopName);
@@ -859,6 +882,8 @@ Examples:
 				};
 			}
 
+			pauseCurrentForSwitch(ctx, loopName);
+
 			const fullPath = path.resolve(ctx.cwd, taskFile);
 			ensureDir(fullPath);
 			fs.writeFileSync(fullPath, params.taskContent, "utf-8");
@@ -867,9 +892,9 @@ Examples:
 				name: loopName,
 				taskFile,
 				iteration: 1,
-				maxIterations: params.maxIterations ?? 50,
-				itemsPerIteration: params.itemsPerIteration ?? 0,
-				reflectEvery: params.reflectEvery ?? 0,
+				maxIterations: nonNegativeInt(params.maxIterations, 50),
+				itemsPerIteration: nonNegativeInt(params.itemsPerIteration, 0),
+				reflectEvery: nonNegativeInt(params.reflectEvery, 0),
 				reflectInstructions: DEFAULT_REFLECT_INSTRUCTIONS,
 				endInstructions: params.endInstructions ?? "",
 				active: true,
@@ -879,17 +904,12 @@ Examples:
 				continuationQueued: false,
 			};
 			claimLoop(ctx, state);
-
-			saveState(ctx, state);
 			currentLoop = loopName;
-			updateUI(ctx);
+			queueContinuation(ctx, state, false);
 
-			state.continuationQueued = true;
-			saveState(ctx, state);
-			pi.sendUserMessage(buildPrompt(state, params.taskContent, false), { deliverAs: "followUp" });
-
+			const limit = state.maxIterations > 0 ? `${state.maxIterations} iterations` : "unlimited iterations";
 			return {
-				content: [{ type: "text", text: `Started loop "${loopName}" (max ${state.maxIterations} iterations).` }],
+				content: [{ type: "text", text: `Started loop "${loopName}" (${limit}).` }],
 				details: {},
 			};
 		},
@@ -899,12 +919,10 @@ Examples:
 	pi.registerTool({
 		name: "ralph_done",
 		label: "Ralph Iteration Done",
-		description: "Signal that you've completed this iteration of the Ralph loop. Call this after making progress to get the next iteration prompt. Do NOT call this if you've output the completion marker.",
-		promptSnippet: "Advance an active Ralph loop after completing the current iteration.",
+		description: "Finish a productive iteration and queue the next one.",
+		promptSnippet: "Advance an active Ralph loop after productive work.",
 		promptGuidelines: [
-			"Call this after making real iteration progress so Ralph can queue the next prompt.",
-			"Do not call this if there is no active loop, if pending messages are already queued, if the completion marker has already been emitted, or if the next useful work is blocked on pending async subagents/tools.",
-			"When blocked on async work, update the Ralph task file with pending run IDs/status and end the turn or register a watcher instead of calling ralph_done.",
+			"Call ralph_done only after real progress and only when another unblocked iteration should start; never use it to poll background work.",
 		],
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -941,7 +959,6 @@ Examples:
 					};
 				}
 				state.continuationQueued = false;
-				saveState(ctx, state);
 			}
 
 			// Increment iteration
@@ -949,32 +966,16 @@ Examples:
 
 			// Check max iterations
 			if (state.maxIterations > 0 && state.iteration > state.maxIterations) {
-				completeLoop(
-					ctx,
-					state,
-					`───────────────────────────────────────────────────────────────────────
-⚠️ RALPH LOOP STOPPED: ${state.name} | Max iterations (${state.maxIterations}) reached
-───────────────────────────────────────────────────────────────────────`,
-				);
+				completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
 				return { content: [{ type: "text", text: "Max iterations reached. Loop stopped." }], details: {} };
 			}
 
 			const needsReflection = state.reflectEvery > 0 && (state.iteration - 1) % state.reflectEvery === 0;
 			if (needsReflection) state.lastReflectionAt = state.iteration;
 
-			saveState(ctx, state);
-			updateUI(ctx);
-
-			const content = tryRead(path.resolve(ctx.cwd, state.taskFile));
-			if (!content) {
-				pauseLoop(ctx, state);
-				return { content: [{ type: "text", text: `Error: Could not read task file: ${state.taskFile}` }], details: {} };
+			if (!queueContinuation(ctx, state, needsReflection)) {
+				return { content: [{ type: "text", text: `Could not read task file: ${state.taskFile}. Loop paused.` }], details: {} };
 			}
-
-			// Queue next iteration - use followUp so user can still interrupt
-			state.continuationQueued = true;
-			saveState(ctx, state);
-			pi.sendUserMessage(buildPrompt(state, content, needsReflection), { deliverAs: "followUp" });
 
 			return {
 				content: [{ type: "text", text: `Iteration ${state.iteration - 1} complete. Next iteration queued.` }],
@@ -995,22 +996,20 @@ Examples:
 		}
 
 		const iterStr = `${state.iteration}${state.maxIterations > 0 ? `/${state.maxIterations}` : ""}`;
-		if (event.prompt.includes(`🔄 RALPH LOOP: ${state.name} | Iteration ${state.iteration}`) && state.continuationQueued) {
+		if (event.prompt.startsWith(`${CONTINUATION_PREFIX} ${state.name} · iteration`) && state.continuationQueued) {
 			state.continuationQueued = false;
 			saveState(ctx, state);
 		}
 
-		let instructions = `You are in a Ralph loop working on: ${state.taskFile}\n`;
-		if (state.itemsPerIteration > 0) {
-			instructions += `- Work on ~${state.itemsPerIteration} items this iteration\n`;
-		}
-		instructions += `- Update the task file as you progress\n`;
-		instructions += `- ${ASYNC_WAIT_INSTRUCTIONS}\n`;
-		instructions += `- When FULLY COMPLETE: ${COMPLETE_MARKER}\n`;
-		instructions += `- Otherwise, call ralph_done only after real progress and only when another useful unblocked iteration should run now`;
-		return {
-			systemPrompt: event.systemPrompt + `\n[RALPH LOOP - ${state.name} - Iteration ${iterStr}]\n\n${instructions}`,
-		};
+		const instructions = [
+			`Active Ralph loop: ${state.name}, iteration ${iterStr}, task file ${state.taskFile}.`,
+			"Read the task file before working and keep it updated.",
+			state.itemsPerIteration > 0 ? `Work on about ${state.itemsPerIteration} items this iteration.` : "",
+			`When fully complete, emit ${COMPLETE_MARKER}; otherwise call ralph_done after productive work.`,
+		]
+			.filter(Boolean)
+			.join("\n");
+		return { systemPrompt: `${event.systemPrompt}\n\n[RALPH]\n${instructions}` };
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
@@ -1033,25 +1032,13 @@ Examples:
 				: "";
 
 		if (text.includes(COMPLETE_MARKER)) {
-			completeLoop(
-				ctx,
-				state,
-				`───────────────────────────────────────────────────────────────────────
-✅ RALPH LOOP COMPLETE: ${state.name} | ${state.iteration} iterations
-───────────────────────────────────────────────────────────────────────`,
-			);
+			completeLoop(ctx, state, `completed after ${state.iteration} iteration${state.iteration === 1 ? "" : "s"}`);
 			return;
 		}
 
 		// Check max iterations
 		if (state.maxIterations > 0 && state.iteration >= state.maxIterations) {
-			completeLoop(
-				ctx,
-				state,
-				`───────────────────────────────────────────────────────────────────────
-⚠️ RALPH LOOP STOPPED: ${state.name} | Max iterations (${state.maxIterations}) reached
-───────────────────────────────────────────────────────────────────────`,
-			);
+			completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
 			return;
 		}
 
@@ -1076,19 +1063,13 @@ Examples:
 		}
 
 		if (active.length > 0 && ctx.hasUI) {
-			const lines = active.map(
-				(l) =>
-					`  • ${l.name} (iteration ${l.iteration}${l.maxIterations > 0 ? `/${l.maxIterations}` : ""}, owner: ${formatOwner(ctx, l)})`,
-			);
-			ctx.ui.notify(`Active Ralph loops:\n${lines.join("\n")}\n\nUse /ralph resume <name> to explicitly claim one.`, "info");
+			const preview = active
+				.slice(0, 3)
+				.map((loop) => `${loop.name} ${loop.iteration}${loop.maxIterations > 0 ? `/${loop.maxIterations}` : ""}`)
+				.join(", ");
+			const more = active.length > 3 ? `, +${active.length - 3} more` : "";
+			ctx.ui.notify(`Ralph: ${active.length} active loop${active.length === 1 ? "" : "s"} (${preview}${more}). /ralph status`, "info");
 		}
 		updateUI(ctx);
-	});
-
-	pi.on("session_shutdown", async (_event, ctx) => {
-		if (currentLoop) {
-			const state = loadState(ctx, currentLoop);
-			if (state) saveState(ctx, state);
-		}
 	});
 }

@@ -5,9 +5,18 @@
 ### Changed
 - Replace the tall active-loop widget and duplicate footer status with a single width-safe line showing the loop name, status, and iteration.
 - Make `/ralph status [name]` open current or named loop details in a picker/modal flow, with notification output retained for non-TUI modes.
-- Ignore malformed Ralph state files instead of letting one corrupt JSON file break status listing or session startup.
+- Replace full task-file replay with short continuation prompts that point to the canonical task file, with a snapshot fallback when no read-capable tool is active.
+- Reduce always-on tool guidance, active-loop system instructions, and the Agent Skill to a concise, non-duplicative contract.
+- Send a completion follow-up only when hidden end instructions exist, avoiding a wasted model turn on ordinary completion.
+- Use atomic state-file replacement and remove redundant shutdown writes.
+- Add focused integration tests for prompt size, resume semantics, loop switching, completion turns, validation, and state writes.
 
 ### Fixed
+- Ignore malformed Ralph state files instead of letting one corrupt JSON file break status listing or session startup.
+- Resuming or reclaiming a loop no longer increments its iteration counter without completed work.
+- Starting a different loop now pauses the previous loop owned by the same Pi session instead of leaving multiple session-owned loops active.
+- Reject unusable loop names and clamp numeric options to non-negative integers, including compatibility normalization for older stored tool calls; invalid CLI numbers now retain safe defaults instead of becoming unlimited.
+- Archive task files using path-aware containment checks instead of unsafe string-prefix checks.
 - Queue Ralph-injected user messages as follow-ups so completion banners and loop prompts no longer throw `Agent is already processing` when emitted from an active agent run.
 - Active Ralph loops are now owned by the Pi session that starts/resumes them. Starting another Pi in the same directory lists existing active loops but no longer auto-claims them or injects their loop prompts; `/ralph resume <name>` explicitly claims a loop.
 
