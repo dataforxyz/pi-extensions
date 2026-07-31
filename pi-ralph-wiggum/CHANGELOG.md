@@ -14,6 +14,8 @@
 - Add focused integration tests for prompt size, resume semantics, loop switching, completion turns, validation, and state writes.
 
 ### Fixed
+- Clear stale in-memory/UI loop state if the active loop disappears, pauses, or is reclaimed by another session while context is being prepared.
+- Run state-mutating Ralph tools sequentially so sibling tool calls cannot race iteration or ownership state.
 - Ignore malformed Ralph state files instead of letting one corrupt JSON file break status listing or session startup.
 - Resuming or reclaiming a loop no longer increments its iteration counter without completed work.
 - Starting a different loop now pauses the previous loop owned by the same Pi session instead of leaving multiple session-owned loops active.

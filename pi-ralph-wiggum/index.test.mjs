@@ -15,9 +15,11 @@ function createHarness() {
 	const events = new Map();
 	const prompts = [];
 	const notifications = [];
+	const widgets = [];
 	let activeTools = ["read", "bash", "edit", "write"];
 	let getActiveToolsError = false;
 	let pendingMessages = false;
+	let sessionId = "test-session";
 
 	const pi = {
 		registerCommand(name, command) {
@@ -52,7 +54,7 @@ function createHarness() {
 		hasPendingMessages: () => pendingMessages,
 		isIdle: () => true,
 		sessionManager: {
-			getSessionId: () => "test-session",
+			getSessionId: () => sessionId,
 			getSessionFile: () => join(cwd, "session.jsonl"),
 		},
 		ui: {
@@ -61,7 +63,9 @@ function createHarness() {
 				notifications.push({ message, level });
 			},
 			setStatus() {},
-			setWidget() {},
+			setWidget(key, value) {
+				widgets.push({ key, value });
+			},
 			select: async () => undefined,
 			confirm: async () => false,
 			custom: async () => undefined,
@@ -75,6 +79,7 @@ function createHarness() {
 		events,
 		prompts,
 		notifications,
+		widgets,
 		ctx,
 		setActiveTools(tools) {
 			activeTools = [...tools];
@@ -84,6 +89,9 @@ function createHarness() {
 		},
 		setPendingMessages(value) {
 			pendingMessages = value;
+		},
+		setSessionId(value) {
+			sessionId = value;
 		},
 		cleanup: () => rmSync(cwd, { recursive: true, force: true }),
 	};
@@ -156,6 +164,47 @@ test("each continuation resets model context to the latest iteration boundary", 
 	}
 });
 
+test("context reset selects the newest boundary and retains the current iteration", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		await consumeContinuation(h, 0);
+		await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: h.prompts[0] }] },
+			{ role: "assistant", content: [{ type: "text", text: "iteration one" }] },
+			{ role: "toolResult", content: [{ type: "text", text: "done result" }] },
+			{ role: "user", content: [{ type: "text", text: h.prompts[1] }] },
+			{ role: "assistant", content: [{ type: "text", text: "iteration two" }] },
+		];
+		const context = h.events.get("context")[0];
+		const result = await context({ messages }, h.ctx);
+		assert.deepEqual(result.messages, messages.slice(3));
+		assert.equal(readState(h, "review-loop").continuationQueued, false);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("context reset never filters for a loop owned by another session", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		h.setSessionId("different-session");
+		const context = h.events.get("context")[0];
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: "unrelated conversation" }] },
+			{ role: "user", content: [{ type: "text", text: h.prompts[0] }] },
+		];
+		assert.equal(await context({ messages }, h.ctx), undefined);
+		assert.deepEqual(messages[0].content[0].text, "unrelated conversation");
+		assert.equal(h.widgets.at(-1).value, undefined);
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("continuation falls back to a task snapshot without read-capable tools", async () => {
 	const h = createHarness();
 	try {
@@ -175,6 +224,16 @@ test("getActiveTools loader errors fall back to a snapshot instead of pausing", 
 		await startLoop(h, { taskContent: "# Task\n\nLoader fallback" });
 		assert.match(h.prompts[0], /Loader fallback/);
 		assert.equal(readState(h, "review-loop").status, "active");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("state-mutating Ralph tools require sequential execution", () => {
+	const h = createHarness();
+	try {
+		assert.equal(h.tools.get("ralph_start").executionMode, "sequential");
+		assert.equal(h.tools.get("ralph_done").executionMode, "sequential");
 	} finally {
 		h.cleanup();
 	}
@@ -211,6 +270,20 @@ test("ralph_done advances once and queues another small continuation", async () 
 		assert.equal(h.prompts[1].includes("do-not-replay"), false);
 		assert.match(h.prompts[1], /iteration 2\/40/);
 		assert.equal(readState(h, "review-loop").iteration, 2);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("reflection cadence survives fresh-context continuation prompts", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { reflectEvery: 1 });
+		await consumeContinuation(h);
+		await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+		assert.match(h.prompts[1], /Reflection:/);
+		assert.match(h.prompts[1], /Review progress, blockers, approach, and next priorities/);
+		assert.equal(readState(h, "review-loop").lastReflectionAt, 2);
 	} finally {
 		h.cleanup();
 	}
@@ -313,6 +386,7 @@ test("completion reveals end instructions only when configured", async () => {
 	const h = createHarness();
 	try {
 		await startLoop(h, { endInstructions: "Publish the final report." });
+		assert.equal(h.prompts[0].includes("Publish the final report."), false);
 		const agentEnd = h.events.get("agent_end")[0];
 		await agentEnd(
 			{

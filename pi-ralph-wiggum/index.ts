@@ -854,6 +854,7 @@ Examples:
 	pi.registerTool({
 		name: "ralph_start",
 		label: "Start Ralph Loop",
+		executionMode: "sequential",
 		description: "Start a persistent, bounded development loop.",
 		promptSnippet: "Start a bounded multi-iteration development loop.",
 		parameters: Type.Object({
@@ -934,6 +935,7 @@ Examples:
 	pi.registerTool({
 		name: "ralph_done",
 		label: "Ralph Iteration Done",
+		executionMode: "sequential",
 		description: "Finish a productive iteration and queue the next one.",
 		promptSnippet: "Advance an active Ralph loop after productive work.",
 		promptGuidelines: [
@@ -1009,7 +1011,11 @@ Examples:
 	pi.on("context", async (event, ctx) => {
 		if (!currentLoop) return;
 		const state = loadState(ctx, currentLoop);
-		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) return;
+		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) {
+			currentLoop = null;
+			updateUI(ctx);
+			return;
+		}
 
 		const boundary = `${CONTINUATION_PREFIX} ${state.name} · iteration`;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
