@@ -44,8 +44,8 @@ You ask Pi to set up a ralph-wiggum loop.
   4. (optionally) After how many iterations it should take a step back and self-reflect
   5. (optionally) End-of-loop instructions that should be hidden until the loop reports completion
 - Pi runs `ralph_start`, beginning iteration 1.
-  - Ralph sends a short continuation pointing to `.ralph/<name>.md`; it does not replay the full, growing task file into every iteration.
-  - The agent reads and updates that file, works on unblocked items, and calls `ralph_done` only when another useful iteration can start.
+  - Every iteration gets a fresh model context. Ralph removes all messages before the latest iteration boundary and restores state from `.ralph/<name>.md`.
+  - The short continuation points to that file instead of replaying its full contents. The agent reads and updates it, works on unblocked items, and calls `ralph_done` only when another useful iteration can start.
   - If background work blocks the next item, it records what is pending and stops instead of burning iterations to poll.
 - Pi runs until either:
   - All tasks are done (Pi sends `<promise>COMPLETE</promise>`)
@@ -101,7 +101,9 @@ ralph_start({
 
 ## Prompt and completion behavior
 
-Normal continuation prompts are deliberately small: loop name, iteration, task-file path, and an optional reflection instruction. The task file remains the canonical working state instead of being duplicated into conversation history every iteration. If neither `read` nor `bash` is active, Ralph falls back to embedding a task snapshot so restricted/custom tool configurations still work. Ralph's active-loop system guidance is also kept concise.
+Normal continuation prompts are deliberately small: loop name, iteration, task-file path, and an optional reflection instruction. Before each model call, Ralph slices context at the latest continuation boundary, so prior iterations and the conversation that started the loop are not sent to the model. The task file is the only cross-iteration working memory. The Pi transcript remains available for audit, but it is excluded from the next iteration's model context.
+
+If neither `read` nor `bash` is active, Ralph embeds a task snapshot so restricted/custom tool configurations still work. Successful `ralph_start` and `ralph_done` calls terminate their tool turn after queuing the fresh-context continuation, avoiding an extra summary response.
 
 `endInstructions` are stored in Ralph state, not inserted into normal iteration prompts or the task file. When the assistant emits `<promise>COMPLETE</promise>` or the loop otherwise ends through Ralph completion handling, the extension sends a follow-up only when hidden end instructions actually exist. A normal completion without end instructions does not spend another model turn.
 

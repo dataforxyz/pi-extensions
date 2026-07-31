@@ -359,6 +359,18 @@ export default function (pi: ExtensionAPI) {
 			.join("\n");
 	}
 
+	function messageText(message: { role?: string; content?: unknown }): string {
+		if (message.role !== "user") return "";
+		if (typeof message.content === "string") return message.content;
+		if (!Array.isArray(message.content)) return "";
+		return message.content
+			.filter((part): part is { type: "text"; text: string } =>
+				typeof part === "object" && part !== null && "type" in part && part.type === "text" && "text" in part && typeof part.text === "string",
+			)
+			.map((part) => part.text)
+			.join("\n");
+	}
+
 	async function showLoopDetails(ctx: ExtensionCommandContext, state: LoopState): Promise<void> {
 		const details = getLoopDetails(ctx, state);
 		await ctx.ui.custom(
@@ -443,11 +455,13 @@ export default function (pi: ExtensionAPI) {
 		const lines = [
 			`${CONTINUATION_PREFIX} ${state.name} · iteration ${iteration}`,
 			taskSnapshot === undefined
-				? `Read ${state.taskFile}, then continue with the next unblocked work.`
+				? `Read ${state.taskFile}, work on the next unblocked items, and update the file.`
 				: `No read-capable tool is active. Use this task snapshot and keep ${state.taskFile} updated:\n\n${taskSnapshot}`,
+			state.itemsPerIteration > 0 ? `Aim for about ${state.itemsPerIteration} items this iteration.` : "",
+			`When fully complete, emit ${COMPLETE_MARKER}. Otherwise call ralph_done after productive work; if blocked, record what is pending and stop.`,
 		];
 		if (isReflection) lines.push(`Reflection: ${state.reflectInstructions}`);
-		return lines.join("\n");
+		return lines.filter(Boolean).join("\n");
 	}
 
 	function queueContinuation(ctx: ExtensionContext, state: LoopState, isReflection: boolean): boolean {
@@ -911,6 +925,7 @@ Examples:
 			return {
 				content: [{ type: "text", text: `Started loop "${loopName}" (${limit}).` }],
 				details: {},
+				terminate: true,
 			};
 		},
 	});
@@ -950,7 +965,7 @@ Examples:
 			// stacking multiple Ralph continuation prompts. If the guard is still set but
 			// Pi no longer reports pending messages, treat it as stale: the queued Ralph
 			// prompt has already started/been consumed (not all delivery paths reliably
-			// clear it via before_agent_start).
+			// clear it through the context boundary handler).
 			if (state.continuationQueued) {
 				if (ctx.hasPendingMessages()) {
 					return {
@@ -967,7 +982,11 @@ Examples:
 			// Check max iterations
 			if (state.maxIterations > 0 && state.iteration > state.maxIterations) {
 				completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
-				return { content: [{ type: "text", text: "Max iterations reached. Loop stopped." }], details: {} };
+				return {
+					content: [{ type: "text", text: "Max iterations reached. Loop stopped." }],
+					details: {},
+					terminate: true,
+				};
 			}
 
 			const needsReflection = state.reflectEvery > 0 && (state.iteration - 1) % state.reflectEvery === 0;
@@ -980,36 +999,28 @@ Examples:
 			return {
 				content: [{ type: "text", text: `Iteration ${state.iteration - 1} complete. Next iteration queued.` }],
 				details: {},
+				terminate: true,
 			};
 		},
 	});
 
 	// --- Event handlers ---
 
-	pi.on("before_agent_start", async (event, ctx) => {
+	pi.on("context", async (event, ctx) => {
 		if (!currentLoop) return;
 		const state = loadState(ctx, currentLoop);
-		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) {
-			currentLoop = null;
-			updateUI(ctx);
-			return;
-		}
+		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) return;
 
-		const iterStr = `${state.iteration}${state.maxIterations > 0 ? `/${state.maxIterations}` : ""}`;
-		if (event.prompt.startsWith(`${CONTINUATION_PREFIX} ${state.name} · iteration`) && state.continuationQueued) {
-			state.continuationQueued = false;
-			saveState(ctx, state);
+		const boundary = `${CONTINUATION_PREFIX} ${state.name} · iteration`;
+		for (let index = event.messages.length - 1; index >= 0; index--) {
+			if (messageText(event.messages[index] as { role?: string; content?: unknown }).startsWith(boundary)) {
+				if (state.continuationQueued) {
+					state.continuationQueued = false;
+					saveState(ctx, state);
+				}
+				return { messages: event.messages.slice(index) };
+			}
 		}
-
-		const instructions = [
-			`Active Ralph loop: ${state.name}, iteration ${iterStr}, task file ${state.taskFile}.`,
-			"Read the task file before working and keep it updated.",
-			state.itemsPerIteration > 0 ? `Work on about ${state.itemsPerIteration} items this iteration.` : "",
-			`When fully complete, emit ${COMPLETE_MARKER}; otherwise call ralph_done after productive work.`,
-		]
-			.filter(Boolean)
-			.join("\n");
-		return { systemPrompt: `${event.systemPrompt}\n\n[RALPH]\n${instructions}` };
 	});
 
 	pi.on("agent_end", async (event, ctx) => {

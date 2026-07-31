@@ -5,7 +5,9 @@
 ### Changed
 - Replace the tall active-loop widget and duplicate footer status with a single width-safe line showing the loop name, status, and iteration.
 - Make `/ralph status [name]` open current or named loop details in a picker/modal flow, with notification output retained for non-TUI modes.
+- Reset model context at every iteration boundary while retaining the full Pi transcript for audit; the task file is now the only cross-iteration working memory.
 - Replace full task-file replay with short continuation prompts that point to the canonical task file, with a snapshot fallback when no read-capable tool is active.
+- Terminate successful `ralph_start` and `ralph_done` tool turns after queuing the continuation, eliminating the redundant intermediate summary response.
 - Reduce always-on tool guidance, active-loop system instructions, and the Agent Skill to a concise, non-duplicative contract.
 - Send a completion follow-up only when hidden end instructions exist, avoiding a wasted model turn on ordinary completion.
 - Use atomic state-file replacement and remove redundant shutdown writes.

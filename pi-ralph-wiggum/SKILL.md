@@ -26,8 +26,9 @@ ralph_start({
 4. If background work blocks the next item, record what is pending and stop. Do not spend iterations polling; use `return_on` when appropriate.
 5. When fully complete, emit `<promise>COMPLETE</promise>` instead of calling `ralph_done`.
 6. Resuming or reclaiming a loop does not consume an iteration.
-7. Continuation prompts reference the task file rather than replaying it into conversation history.
-8. `endInstructions`, when provided, remain hidden until completion.
+7. Each iteration uses a fresh model context beginning at its continuation marker. Earlier conversation and prior iterations remain in the transcript but are excluded from the model request.
+8. Continuation prompts reference the task file rather than replaying it. The task file is the cross-iteration memory.
+9. `endInstructions`, when provided, remain hidden until completion.
 
 ## Commands
 

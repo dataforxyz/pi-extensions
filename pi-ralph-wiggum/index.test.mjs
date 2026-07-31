@@ -110,21 +110,47 @@ function readState(harness, name) {
 	return JSON.parse(readFileSync(join(harness.cwd, ".ralph", `${name}.state.json`), "utf8"));
 }
 
+async function consumeContinuation(harness, promptIndex = harness.prompts.length - 1) {
+	const context = harness.events.get("context")[0];
+	return context(
+		{ messages: [{ role: "user", content: [{ type: "text", text: harness.prompts[promptIndex] }] }] },
+		harness.ctx,
+	);
+}
+
 test("continuation prompts stay small and never replay task contents", async () => {
 	const h = createHarness();
 	try {
 		const uniqueTaskText = `# Task\n${"large-task-body ".repeat(2000)}`;
-		await startLoop(h, { taskContent: uniqueTaskText });
+		const startResult = await startLoop(h, { taskContent: uniqueTaskText });
 
+		assert.equal(startResult.terminate, true);
 		assert.equal(h.prompts.length, 1);
-		assert.ok(h.prompts[0].length < 240, `prompt was ${h.prompts[0].length} characters`);
+		assert.ok(h.prompts[0].length < 500, `prompt was ${h.prompts[0].length} characters`);
 		assert.equal(h.prompts[0].includes("large-task-body"), false);
 		assert.match(h.prompts[0], /Read \.ralph\/review-loop\.md/);
+		assert.match(h.prompts[0], /<promise>COMPLETE<\/promise>/);
+		assert.match(h.prompts[0], /call ralph_done after productive work/i);
+	} finally {
+		h.cleanup();
+	}
+});
 
-		const beforeStart = h.events.get("before_agent_start")[0];
-		const result = await beforeStart({ prompt: h.prompts[0], systemPrompt: "BASE" }, h.ctx);
-		assert.ok(result.systemPrompt.length - 4 < 600);
-		assert.match(result.systemPrompt, /call ralph_done after productive work/i);
+test("each continuation resets model context to the latest iteration boundary", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		const context = h.events.get("context")[0];
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: "old project conversation" }] },
+			{ role: "assistant", content: [{ type: "text", text: "old response" }] },
+			{ role: "user", content: [{ type: "text", text: h.prompts[0] }] },
+			{ role: "assistant", content: [{ type: "text", text: "iteration work" }] },
+			{ role: "toolResult", content: [{ type: "text", text: "tool output" }] },
+		];
+		const result = await context({ messages }, h.ctx);
+		assert.deepEqual(result.messages, messages.slice(2));
+		assert.equal(JSON.stringify(result.messages).includes("old project conversation"), false);
 	} finally {
 		h.cleanup();
 	}
@@ -176,12 +202,12 @@ test("ralph_done advances once and queues another small continuation", async () 
 	const h = createHarness();
 	try {
 		await startLoop(h, { taskContent: `# Task\n${"do-not-replay ".repeat(1000)}` });
-		const beforeStart = h.events.get("before_agent_start")[0];
-		await beforeStart({ prompt: h.prompts[0], systemPrompt: "BASE" }, h.ctx);
+		await consumeContinuation(h);
 
-		await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+		const doneResult = await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+		assert.equal(doneResult.terminate, true);
 		assert.equal(h.prompts.length, 2);
-		assert.ok(h.prompts[1].length < 240);
+		assert.ok(h.prompts[1].length < 500);
 		assert.equal(h.prompts[1].includes("do-not-replay"), false);
 		assert.match(h.prompts[1], /iteration 2\/40/);
 		assert.equal(readState(h, "review-loop").iteration, 2);
@@ -259,8 +285,7 @@ test("max iterations completes without an extra turn", async () => {
 	const h = createHarness();
 	try {
 		await startLoop(h, { maxIterations: 1 });
-		const beforeStart = h.events.get("before_agent_start")[0];
-		await beforeStart({ prompt: h.prompts[0], systemPrompt: "BASE" }, h.ctx);
+		await consumeContinuation(h);
 		const agentEnd = h.events.get("agent_end")[0];
 		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "work done" }] }] }, h.ctx);
 		assert.equal(readState(h, "review-loop").status, "completed");
@@ -274,8 +299,7 @@ test("missing task file pauses the loop on ralph_done", async () => {
 	const h = createHarness();
 	try {
 		await startLoop(h);
-		const beforeStart = h.events.get("before_agent_start")[0];
-		await beforeStart({ prompt: h.prompts[0], systemPrompt: "BASE" }, h.ctx);
+		await consumeContinuation(h);
 		unlinkSync(join(h.cwd, ".ralph", "review-loop.md"));
 		const result = await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
 		assert.match(result.content[0].text, /Loop paused/);
