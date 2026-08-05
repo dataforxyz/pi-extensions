@@ -939,6 +939,54 @@ Examples:
 		},
 	});
 
+	// Constrained task-ledger update for agents that intentionally lack general
+	// project write tools. This can only replace the current session-owned loop's
+	// own task file; callers cannot select an arbitrary path or another loop.
+	pi.registerTool({
+		name: "ralph_update",
+		label: "Update Ralph Task Ledger",
+		executionMode: "sequential",
+		description: "Replace the active Ralph loop's private task ledger without granting general file-write access.",
+		promptSnippet: "Update only the current Ralph loop task ledger.",
+		parameters: Type.Object({
+			taskContent: Type.String({ description: "Complete replacement markdown for the active loop task ledger" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!currentLoop) {
+				return { content: [{ type: "text", text: "No active Ralph loop." }], details: {} };
+			}
+			const state = loadState(ctx, currentLoop);
+			if (!state || state.status !== "active") {
+				return { content: [{ type: "text", text: "Ralph loop is not active." }], details: {} };
+			}
+			if (!isOwnedByCurrentSession(ctx, state)) {
+				currentLoop = null;
+				updateUI(ctx);
+				return {
+					content: [{ type: "text", text: `Ralph loop "${state.name}" is owned by ${formatOwner(ctx, state)}.` }],
+					details: {},
+				};
+			}
+			const taskPath = path.resolve(ctx.cwd, state.taskFile);
+			const root = ralphDir(ctx);
+			if (!isWithinDir(root, taskPath)) {
+				return { content: [{ type: "text", text: "Active Ralph task ledger is outside the managed Ralph state root." }], details: {} };
+			}
+			ensureDir(taskPath);
+			const tempPath = `${taskPath}.${process.pid}.${Date.now()}.tmp`;
+			try {
+				fs.writeFileSync(tempPath, params.taskContent, "utf-8");
+				fs.renameSync(tempPath, taskPath);
+			} finally {
+				tryDelete(tempPath);
+			}
+			return {
+				content: [{ type: "text", text: `Updated Ralph task ledger for "${state.name}".` }],
+				details: { taskFile: state.taskFile },
+			};
+		},
+	});
+
 	// Tool for agent to signal iteration complete and request next
 	pi.registerTool({
 		name: "ralph_done",

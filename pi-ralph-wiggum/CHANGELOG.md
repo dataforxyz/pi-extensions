@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `ralph_update`, a constrained tool that can replace only the current session-owned loop's managed task ledger, for agents without general project write tools.
+
 - Add `PI_RALPH_STATE_ROOT` so managed Pi workers can keep loop state, generated tasks, and archives in a private runtime directory instead of modifying the project checkout.
 
 ### Changed

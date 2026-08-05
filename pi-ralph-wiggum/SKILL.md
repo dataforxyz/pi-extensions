@@ -21,7 +21,7 @@ ralph_start({
 ## Runtime contract
 
 1. `ralph_start` writes `taskContent` to `.ralph/<name>.md`, or to `<PI_RALPH_STATE_ROOT>/<name>.md` when a private state root is configured. Treat that file as the canonical plan and progress record.
-2. At each iteration, read the task file, work on unblocked items, and update checklist, notes, and verification evidence.
+2. At each iteration, read the task file, work on unblocked items, and update checklist, notes, and verification evidence. If general write tools are intentionally unavailable, use `ralph_update` to replace only the active loop's managed task ledger.
 3. Call `ralph_done` only after real progress and only when another useful iteration can start immediately.
 4. If background work blocks the next item, record what is pending and stop. Do not spend iterations polling; use `return_on` when appropriate.
 5. When fully complete, emit `<promise>COMPLETE</promise>` instead of calling `ralph_done`.
