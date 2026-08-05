@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add `PI_RALPH_STATE_ROOT` so managed Pi workers can keep loop state, generated tasks, and archives in a private runtime directory instead of modifying the project checkout.
+
 ### Changed
 - Replace the tall active-loop widget and duplicate footer status with a single width-safe line showing the loop name, status, and iteration.
 - Make `/ralph status [name]` open current or named loop details in a picker/modal flow, with notification output retained for non-TUI modes.

@@ -80,9 +80,17 @@ While a loop is active, Ralph uses a single width-safe line above the editor sho
 | `--end-instructions "TEXT"` | Store instructions that are revealed only after the loop ends/completes |
 | `--end-instructions-file PATH` | Read completion-only instructions from a file |
 
-## Session ownership
+## State location and session ownership
 
-Ralph loop files remain project-scoped under `.ralph/`, but active execution is Pi-session-owned. A new Pi opened in the same directory will list active loops without automatically claiming or injecting them into prompts. Use `/ralph resume <name>` when you intentionally want the current Pi session to take over a loop.
+By default, Ralph loop state and generated task files remain project-scoped under `.ralph/`. Set `PI_RALPH_STATE_ROOT` to move the complete Ralph state tree—including task files and archives—to another directory. Relative values resolve from Pi's working directory; an absolute private runtime path is recommended for managed or sandboxed workers that must not dirty a shared checkout:
+
+```bash
+PI_RALPH_STATE_ROOT=/run/user/$UID/my-worker/ralph pi
+```
+
+Continuation prompts use the configured task-file path, and `/ralph status`, `list`, `archive`, `clean`, `cancel`, and `nuke` all operate on the same configured root. Explicit task paths passed to `/ralph start <path>` remain external and are not moved by changing the state root.
+
+Active execution is Pi-session-owned. A new Pi using the same state root will list active loops without automatically claiming or injecting them into prompts. Use `/ralph resume <name>` when you intentionally want the current Pi session to take over a loop.
 
 ## Agent Tool
 

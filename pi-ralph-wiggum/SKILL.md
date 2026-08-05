@@ -20,7 +20,7 @@ ralph_start({
 
 ## Runtime contract
 
-1. `ralph_start` writes `taskContent` to `.ralph/<name>.md`. Treat that file as the canonical plan and progress record.
+1. `ralph_start` writes `taskContent` to `.ralph/<name>.md`, or to `<PI_RALPH_STATE_ROOT>/<name>.md` when a private state root is configured. Treat that file as the canonical plan and progress record.
 2. At each iteration, read the task file, work on unblocked items, and update checklist, notes, and verification evidence.
 3. Call `ralph_done` only after real progress and only when another useful iteration can start immediately.
 4. If background work blocks the next item, record what is pending and stop. Do not spend iterations polling; use `return_on` when appropriate.
@@ -43,7 +43,7 @@ ralph_start({
 - `/ralph cancel <name>` — delete loop state.
 - `/ralph nuke [--yes]` — delete all project `.ralph` data.
 
-Loop files are project-scoped, but execution ownership is Pi-session-scoped. A new session lists active loops without claiming them; use `/ralph resume <name>` to take over intentionally.
+Loop files are project-scoped by default, but `PI_RALPH_STATE_ROOT` can relocate the full state tree to a private runtime directory. Execution ownership is Pi-session-scoped. A new session lists active loops without claiming them; use `/ralph resume <name>` to take over intentionally.
 
 Press Esc to interrupt streaming. Send a normal message to continue, or run `/ralph-stop` while idle to end the loop.
 
