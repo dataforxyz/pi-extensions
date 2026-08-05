@@ -23,6 +23,7 @@ function createHarness(options = {}) {
 	let activeTools = ["read", "bash", "edit", "write"];
 	let getActiveToolsError = false;
 	let pendingMessages = false;
+	let contextUsage = { tokens: 0, contextWindow: 272_000, percent: 0 };
 	let sessionId = "test-session";
 
 	const pi = {
@@ -57,6 +58,7 @@ function createHarness(options = {}) {
 		mode: "tui",
 		hasPendingMessages: () => pendingMessages,
 		isIdle: () => true,
+		getContextUsage: () => contextUsage,
 		sessionManager: {
 			getSessionId: () => sessionId,
 			getSessionFile: () => join(cwd, "session.jsonl"),
@@ -95,6 +97,9 @@ function createHarness(options = {}) {
 		setPendingMessages(value) {
 			pendingMessages = value;
 		},
+		setContextUsage(value) {
+			contextUsage = value;
+		},
 		setSessionId(value) {
 			sessionId = value;
 		},
@@ -129,6 +134,14 @@ function readState(harness, name) {
 }
 
 async function consumeContinuation(harness, promptIndex = harness.prompts.length - 1) {
+	const context = harness.events.get("context")[0];
+	return context(
+		{ messages: [{ role: "user", content: [{ type: "text", text: harness.prompts[promptIndex] }] }] },
+		harness.ctx,
+	);
+}
+
+async function consumeCheckpoint(harness, promptIndex = harness.prompts.length - 1) {
 	const context = harness.events.get("context")[0];
 	return context(
 		{ messages: [{ role: "user", content: [{ type: "text", text: harness.prompts[promptIndex] }] }] },
@@ -327,10 +340,14 @@ test("legacy numeric tool arguments are normalized before validation", () => {
 			itemsPerIteration: 2.9,
 			reflectEvery: -4,
 			maxIterations: 8.8,
+			compactionsPerIteration: 3.9,
+			compactionCheckpointPercent: 120,
 		});
 		assert.equal(prepared.itemsPerIteration, 2);
 		assert.equal(prepared.reflectEvery, 0);
 		assert.equal(prepared.maxIterations, 8);
+		assert.equal(prepared.compactionsPerIteration, 3);
+		assert.equal(prepared.compactionCheckpointPercent, 100);
 	} finally {
 		h.cleanup();
 	}
@@ -363,6 +380,228 @@ test("reflection cadence survives fresh-context continuation prompts", async () 
 		assert.match(h.prompts[1], /Reflection:/);
 		assert.match(h.prompts[1], /Review progress, blockers, approach, and next priorities/);
 		assert.equal(readState(h, "review-loop").lastReflectionAt, 2);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("compaction checkpointing defaults to five compactions", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		const state = readState(h, "review-loop");
+		assert.equal(state.compactionsPerIteration, 5);
+		assert.equal(state.compactionCheckpointPercent, 90);
+		assert.equal(h.tools.get("ralph_start").parameters.properties.compactionsPerIteration.default, 5);
+		assert.equal(h.tools.get("ralph_start").parameters.properties.compactionCheckpointPercent.default, 90);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("after four compactions, 90% context usage checkpoints before the fifth", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		await consumeContinuation(h);
+		const compact = h.events.get("session_compact")[0];
+		for (let i = 0; i < 4; i++) {
+			await compact({ reason: "manual", willRetry: false }, h.ctx);
+		}
+		assert.equal(readState(h, "review-loop").compactionsThisIteration, 4);
+		assert.equal(readState(h, "review-loop").totalCompactions, 4);
+
+		const turnEnd = h.events.get("turn_end")[0];
+		h.setContextUsage({ tokens: 244_528, contextWindow: 272_000, percent: 89.9 });
+		await turnEnd({}, h.ctx);
+		assert.equal(h.prompts.length, 1);
+
+		h.setContextUsage({ tokens: 244_800, contextWindow: 272_000, percent: 90 });
+		await turnEnd({}, h.ctx);
+		let state = readState(h, "review-loop");
+		assert.equal(state.iteration, 1);
+		assert.equal(state.compactionCheckpointQueued, true);
+		assert.equal(h.prompts.length, 2);
+		assert.match(h.prompts[1], /90\.0% \(244,800\/272,000 tokens\)/);
+		assert.match(h.prompts[1], /checkpointing before compaction 5/i);
+
+		await consumeCheckpoint(h, 1);
+		const agentEnd = h.events.get("agent_end")[0];
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "notes saved" }] }] }, h.ctx);
+		state = readState(h, "review-loop");
+		assert.equal(state.iteration, 2);
+		assert.equal(state.compactionsThisIteration, 0);
+		assert.equal(state.totalCompactions, 4);
+		assert.equal(h.prompts.length, 3);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("the fifth compaction remains a fallback checkpoint trigger", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { compactionsPerIteration: 2 });
+		await consumeContinuation(h);
+		const compact = h.events.get("session_compact")[0];
+
+		await compact({ reason: "threshold", willRetry: false }, h.ctx);
+		let state = readState(h, "review-loop");
+		assert.equal(state.iteration, 1);
+		assert.equal(state.compactionsThisIteration, 1);
+		assert.equal(state.totalCompactions, 1);
+		assert.equal(h.prompts.length, 1);
+
+		await compact({ reason: "overflow", willRetry: true }, h.ctx);
+		state = readState(h, "review-loop");
+		assert.equal(state.iteration, 1);
+		assert.equal(state.compactionsThisIteration, 2);
+		assert.equal(state.totalCompactions, 2);
+		assert.equal(state.compactionAdvancePending, true);
+		assert.equal(h.prompts.length, 1);
+
+		const agentEnd = h.events.get("agent_end")[0];
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "overflow retry settled" }] }] }, h.ctx);
+		state = readState(h, "review-loop");
+		assert.equal(state.iteration, 1);
+		assert.equal(state.compactionsThisIteration, 2);
+		assert.equal(state.compactionAdvancePending, false);
+		assert.equal(state.compactionCheckpointQueued, true);
+		assert.equal(h.prompts.length, 2);
+		assert.match(h.prompts[1], /update \.ralph\/review-loop\.md with durable notes/i);
+		assert.match(h.prompts[1], /progress, decisions, files changed, verification results, blockers, and next steps/i);
+		await consumeCheckpoint(h, 1);
+		assert.equal(readState(h, "review-loop").compactionCheckpointActive, true);
+
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "checkpoint notes saved" }] }] }, h.ctx);
+		state = readState(h, "review-loop");
+		assert.equal(state.iteration, 2);
+		assert.equal(state.compactionsThisIteration, 0);
+		assert.equal(state.compactionCheckpointQueued, false);
+		assert.equal(h.prompts.length, 3);
+		assert.match(h.prompts[2], /durable notes were checkpointed first/i);
+		assert.ok(h.notifications.some(({ message }) => /notes checkpointed; forced iteration 2/i.test(message)));
+
+		const context = h.events.get("context")[0];
+		assert.equal(
+			await context({ messages: [{ role: "user", content: [{ type: "text", text: h.prompts[0] }] }] }, h.ctx),
+			undefined,
+		);
+		assert.equal(readState(h, "review-loop").continuationQueued, true);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("compactions between iterations are tracked without skipping the queued iteration", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { compactionsPerIteration: 1 });
+		const compact = h.events.get("session_compact")[0];
+		await compact({ reason: "manual", willRetry: false }, h.ctx);
+
+		const state = readState(h, "review-loop");
+		assert.equal(state.iteration, 1);
+		assert.equal(state.compactionsThisIteration, 0);
+		assert.equal(state.totalCompactions, 1);
+		assert.equal(h.prompts.length, 1);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("normal iteration advancement resets the per-iteration compaction count", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { compactionsPerIteration: 3 });
+		await consumeContinuation(h);
+		const compact = h.events.get("session_compact")[0];
+		await compact({ reason: "threshold", willRetry: false }, h.ctx);
+		assert.equal(readState(h, "review-loop").compactionsThisIteration, 1);
+
+		await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+		const state = readState(h, "review-loop");
+		assert.equal(state.iteration, 2);
+		assert.equal(state.compactionsThisIteration, 0);
+		assert.equal(state.totalCompactions, 1);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("agent_end does not complete the max iteration before its queued continuation runs", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { compactionsPerIteration: 1, maxIterations: 2 });
+		await consumeContinuation(h);
+		const compact = h.events.get("session_compact")[0];
+		await compact({ reason: "threshold", willRetry: false }, h.ctx);
+		assert.equal(readState(h, "review-loop").iteration, 1);
+		assert.equal(readState(h, "review-loop").compactionAdvancePending, true);
+
+		const agentEnd = h.events.get("agent_end")[0];
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "iteration one settled" }] }] }, h.ctx);
+		assert.equal(readState(h, "review-loop").iteration, 1);
+		assert.equal(readState(h, "review-loop").compactionCheckpointQueued, true);
+		await consumeCheckpoint(h, 1);
+
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "checkpoint saved" }] }] }, h.ctx);
+		assert.equal(readState(h, "review-loop").iteration, 2);
+		assert.equal(readState(h, "review-loop").status, "active");
+
+		await consumeContinuation(h, 2);
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "iteration two settled" }] }] }, h.ctx);
+		assert.equal(readState(h, "review-loop").status, "completed");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("a compaction-forced advance respects max iterations", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { compactionsPerIteration: 1, maxIterations: 1 });
+		await consumeContinuation(h);
+		const compact = h.events.get("session_compact")[0];
+		await compact({ reason: "threshold", willRetry: false }, h.ctx);
+		const agentEnd = h.events.get("agent_end")[0];
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "max iteration settled" }] }] }, h.ctx);
+		assert.equal(readState(h, "review-loop").compactionCheckpointQueued, true);
+		assert.equal(h.prompts.length, 2);
+		await consumeCheckpoint(h, 1);
+
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "checkpoint saved" }] }] }, h.ctx);
+		const state = readState(h, "review-loop");
+		assert.equal(state.status, "completed");
+		assert.equal(state.totalCompactions, 1);
+		assert.equal(h.prompts.length, 2);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("ralph_done cannot skip a pending compaction notes checkpoint", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { compactionsPerIteration: 1 });
+		await consumeContinuation(h);
+		const compact = h.events.get("session_compact")[0];
+		await compact({ reason: "overflow", willRetry: true }, h.ctx);
+
+		const result = await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+		assert.match(result.content[0].text, /durable-notes checkpoint queued/i);
+		assert.equal(result.terminate, true);
+		assert.equal(readState(h, "review-loop").iteration, 1);
+		assert.equal(readState(h, "review-loop").compactionCheckpointQueued, true);
+		assert.match(h.prompts[1], /RALPH COMPACTION CHECKPOINT/);
+
+		const agentEnd = h.events.get("agent_end")[0];
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "original turn ending" }] }] }, h.ctx);
+		assert.equal(readState(h, "review-loop").iteration, 1);
+
+		await consumeCheckpoint(h, 1);
+		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "notes saved" }] }] }, h.ctx);
+		assert.equal(readState(h, "review-loop").iteration, 2);
 	} finally {
 		h.cleanup();
 	}

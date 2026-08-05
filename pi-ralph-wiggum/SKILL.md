@@ -14,6 +14,8 @@ ralph_start({
   maxIterations: 50,
   itemsPerIteration: 3,
   reflectEvery: 10,
+  compactionsPerIteration: 5,
+  compactionCheckpointPercent: 90,
   endInstructions: "Commit, push, and summarize."
 })
 ```
@@ -28,7 +30,8 @@ ralph_start({
 6. Resuming or reclaiming a loop does not consume an iteration.
 7. Each iteration uses a fresh model context beginning at its continuation marker. Earlier conversation and prior iterations remain in the transcript but are excluded from the model request.
 8. Continuation prompts reference the task file rather than replaying it. The task file is the cross-iteration memory.
-9. `endInstructions`, when provided, remain hidden until completion.
+9. `compactionsPerIteration` defaults to 5 and `compactionCheckpointPercent` defaults to 90. After 4 compactions, Ralph watches live context usage and checkpoints durable notes at 90%, before compaction 5; compaction 5 is the fallback trigger. The note-taking turn is followed automatically by a fresh iteration. Set `compactionsPerIteration` to 0 to disable forcing.
+10. `endInstructions`, when provided, remain hidden until completion.
 
 ## Commands
 
