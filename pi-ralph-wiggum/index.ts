@@ -40,6 +40,7 @@ Describe your task here.
 const DEFAULT_REFLECT_INSTRUCTIONS =
 	"Review progress, blockers, approach, and next priorities. Record the reflection in the task file before continuing.";
 const CONTINUATION_PREFIX = "[RALPH CONTINUE]";
+const COMPACTION_CHECKPOINT_PREFIX = "[RALPH COMPACTION CHECKPOINT]";
 
 type LoopStatus = "active" | "paused" | "completed";
 
@@ -49,6 +50,8 @@ interface RalphStartInput {
 	itemsPerIteration?: number;
 	reflectEvery?: number;
 	maxIterations?: number;
+	compactionsPerIteration?: number;
+	compactionCheckpointPercent?: number;
 	endInstructions?: string;
 }
 
@@ -60,6 +63,10 @@ interface LoopState {
 	itemsPerIteration: number; // Prompt hint only - "process N items per turn"
 	reflectEvery: number; // Reflect every N iterations
 	reflectInstructions: string;
+	compactionsPerIteration: number; // Checkpoint notes and force the next iteration after N compactions (0 disables)
+	compactionCheckpointPercent: number; // Preempt before the Nth compaction at this context usage percentage
+	compactionsThisIteration: number;
+	totalCompactions: number;
 	endInstructions: string; // Only shown after the loop emits COMPLETE_MARKER / ends
 	active: boolean; // Backwards compat
 	status: LoopStatus;
@@ -67,6 +74,9 @@ interface LoopState {
 	completedAt?: string;
 	lastReflectionAt: number; // Last iteration we reflected at
 	continuationQueued?: boolean; // True while a Ralph continuation prompt is already queued
+	compactionAdvancePending?: boolean; // Threshold reached during auto-compaction; checkpoint once the agent settles
+	compactionCheckpointQueued?: boolean; // Note-taking checkpoint queued for delivery
+	compactionCheckpointActive?: boolean; // Checkpoint prompt consumed; advance after that turn ends
 	ownerSessionId?: string; // Pi session that explicitly started/resumed this loop
 	ownerSessionFile?: string; // Session file for diagnostics/status output
 	ownerStartedAt?: string; // When the current owner claimed the loop
@@ -97,6 +107,10 @@ export default function (pi: ExtensionAPI) {
 
 	function nonNegativeInt(value: unknown, fallback: number): number {
 		return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : fallback;
+	}
+
+	function percentage(value: unknown, fallback: number): number {
+		return typeof value === "number" && Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : fallback;
 	}
 
 	function getPath(ctx: ExtensionContext, name: string, ext: string, archived = false): string {
@@ -206,6 +220,10 @@ export default function (pi: ExtensionAPI) {
 		raw.itemsPerIteration = nonNegativeInt(raw.itemsPerIteration, 0);
 		raw.reflectEvery = nonNegativeInt(raw.reflectEvery, 0);
 		raw.reflectInstructions = typeof raw.reflectInstructions === "string" ? raw.reflectInstructions : DEFAULT_REFLECT_INSTRUCTIONS;
+		raw.compactionsPerIteration = nonNegativeInt(raw.compactionsPerIteration, 5);
+		raw.compactionCheckpointPercent = percentage(raw.compactionCheckpointPercent, 90);
+		raw.compactionsThisIteration = nonNegativeInt(raw.compactionsThisIteration, 0);
+		raw.totalCompactions = nonNegativeInt(raw.totalCompactions, raw.compactionsThisIteration);
 		raw.endInstructions = typeof raw.endInstructions === "string" ? raw.endInstructions : "";
 		raw.startedAt = typeof raw.startedAt === "string" ? raw.startedAt : "";
 		raw.lastReflectionAt = nonNegativeInt(raw.lastReflectionAt, 0);
@@ -257,6 +275,9 @@ export default function (pi: ExtensionAPI) {
 	function pauseLoop(ctx: ExtensionContext, state: LoopState, message?: string): void {
 		state.status = "paused";
 		state.continuationQueued = false;
+		state.compactionAdvancePending = false;
+		state.compactionCheckpointQueued = false;
+		state.compactionCheckpointActive = false;
 		saveState(ctx, state);
 		if (currentLoop === state.name) currentLoop = null;
 		updateUI(ctx);
@@ -267,6 +288,9 @@ export default function (pi: ExtensionAPI) {
 		state.status = "completed";
 		state.completedAt = new Date().toISOString();
 		state.continuationQueued = false;
+		state.compactionAdvancePending = false;
+		state.compactionCheckpointQueued = false;
+		state.compactionCheckpointActive = false;
 		saveState(ctx, state);
 		if (currentLoop === state.name) currentLoop = null;
 		updateUI(ctx);
@@ -320,14 +344,21 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
+		const compactionStr =
+			state.compactionsPerIteration > 0
+				? `· C ${state.compactionsThisIteration}/${state.compactionsPerIteration}`
+				: "";
 		ctx.ui.setWidget("ralph", (_tui, theme) => ({
 			render(width: number): string[] {
 				const summary = [
 					theme.fg("accent", theme.bold("Ralph")),
 					theme.fg("muted", `· ${state.name}`),
 					theme.fg("dim", `· ${STATUS_ICONS[state.status]} ${state.iteration}${maxStr}`),
+					compactionStr ? theme.fg("dim", compactionStr) : "",
 					theme.fg("dim", "· /ralph status"),
-				].join(" ");
+				]
+					.filter(Boolean)
+					.join(" ");
 				return [truncateToWidth(summary, width, "…")];
 			},
 			invalidate() {},
@@ -356,6 +387,14 @@ export default function (pi: ExtensionAPI) {
 		if (state.reflectEvery > 0) {
 			const next = state.reflectEvery - ((state.iteration - 1) % state.reflectEvery);
 			details.push(["Next reflection", `${next} iteration${next === 1 ? "" : "s"}`]);
+		}
+		if (state.compactionsPerIteration > 0) {
+			details.push([
+				"Compactions",
+				`${state.compactionsThisIteration}/${state.compactionsPerIteration} this iteration · ${state.totalCompactions} total · checkpoint at ${state.compactionCheckpointPercent}% before #${state.compactionsPerIteration}`,
+			]);
+		} else if (state.totalCompactions > 0) {
+			details.push(["Compactions", `${state.totalCompactions} total (forcing disabled)`]);
 		}
 		if (state.completedAt) details.push(["Completed", formatTimestamp(state.completedAt)]);
 		return details;
@@ -458,10 +497,11 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Prompt building ---
 
-	function buildPrompt(state: LoopState, isReflection: boolean, taskSnapshot?: string): string {
+	function buildPrompt(state: LoopState, isReflection: boolean, taskSnapshot?: string, triggerNote?: string): string {
 		const iteration = `${state.iteration}${state.maxIterations > 0 ? `/${state.maxIterations}` : ""}`;
 		const lines = [
 			`${CONTINUATION_PREFIX} ${state.name} · iteration ${iteration}`,
+			triggerNote ?? "",
 			taskSnapshot === undefined
 				? `Read ${state.taskFile}, work on the next unblocked items, and update the file.`
 				: `No read-capable tool is active. Use this task snapshot and keep ${state.taskFile} updated:\n\n${taskSnapshot}`,
@@ -472,7 +512,12 @@ export default function (pi: ExtensionAPI) {
 		return lines.filter(Boolean).join("\n");
 	}
 
-	function queueContinuation(ctx: ExtensionContext, state: LoopState, isReflection: boolean): boolean {
+	function queueContinuation(
+		ctx: ExtensionContext,
+		state: LoopState,
+		isReflection: boolean,
+		triggerNote?: string,
+	): boolean {
 		const taskPath = path.resolve(ctx.cwd, state.taskFile);
 		let activeTools: Set<string>;
 		try {
@@ -494,8 +539,45 @@ export default function (pi: ExtensionAPI) {
 		state.continuationQueued = true;
 		saveState(ctx, state);
 		updateUI(ctx, state);
-		pi.sendUserMessage(buildPrompt(state, isReflection, taskSnapshot), { deliverAs: "followUp" });
+		pi.sendUserMessage(buildPrompt(state, isReflection, taskSnapshot, triggerNote), { deliverAs: "followUp" });
 		return true;
+	}
+
+	function advanceIteration(ctx: ExtensionContext, state: LoopState, triggerNote?: string): "queued" | "completed" | "paused" {
+		state.iteration++;
+		state.compactionsThisIteration = 0;
+		state.compactionAdvancePending = false;
+		state.compactionCheckpointQueued = false;
+		state.compactionCheckpointActive = false;
+
+		if (state.maxIterations > 0 && state.iteration > state.maxIterations) {
+			completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
+			return "completed";
+		}
+
+		const needsReflection = state.reflectEvery > 0 && (state.iteration - 1) % state.reflectEvery === 0;
+		if (needsReflection) state.lastReflectionAt = state.iteration;
+
+		return queueContinuation(ctx, state, needsReflection, triggerNote) ? "queued" : "paused";
+	}
+
+	function queueCompactionCheckpoint(
+		ctx: ExtensionContext,
+		state: LoopState,
+		deliverAs: "steer" | "followUp" = "followUp",
+		reason?: string,
+	): void {
+		state.compactionAdvancePending = false;
+		state.compactionCheckpointQueued = true;
+		state.compactionCheckpointActive = false;
+		saveState(ctx, state);
+		updateUI(ctx, state);
+		pi.sendUserMessage(
+			`${COMPACTION_CHECKPOINT_PREFIX} ${state.name} · iteration ${state.iteration}\n` +
+				(reason ? `${reason}\n` : "") +
+				`Before Ralph starts a fresh iteration, update ${state.taskFile} with durable notes from this iteration: progress, decisions, files changed, verification results, blockers, and next steps. Do not continue implementation during this checkpoint. After the notes are saved, end the response; Ralph will automatically queue the next iteration.`,
+			{ deliverAs },
+		);
 	}
 
 	// --- Arg parsing ---
@@ -509,6 +591,8 @@ export default function (pi: ExtensionAPI) {
 			itemsPerIteration: 0,
 			reflectEvery: 0,
 			reflectInstructions: DEFAULT_REFLECT_INSTRUCTIONS,
+			compactionsPerIteration: 5,
+			compactionCheckpointPercent: 90,
 			endInstructions: "",
 			endInstructionsFile: "",
 		};
@@ -527,6 +611,12 @@ export default function (pi: ExtensionAPI) {
 				i++;
 			} else if (tok === "--reflect-instructions" && next) {
 				result.reflectInstructions = next;
+				i++;
+			} else if (tok === "--compactions-per-iteration" && next) {
+				result.compactionsPerIteration = nonNegativeInt(Number(next), result.compactionsPerIteration);
+				i++;
+			} else if (tok === "--compaction-checkpoint-percent" && next) {
+				result.compactionCheckpointPercent = percentage(Number(next), result.compactionCheckpointPercent);
 				i++;
 			} else if (tok === "--end-instructions" && next) {
 				result.endInstructions = next;
@@ -548,7 +638,7 @@ export default function (pi: ExtensionAPI) {
 			const args = parseArgs(rest);
 			if (!args.name) {
 				ctx.ui.notify(
-					"Usage: /ralph start <name|path> [--items-per-iteration N] [--reflect-every N] [--max-iterations N] [--end-instructions \"TEXT\"|--end-instructions-file PATH]",
+					"Usage: /ralph start <name|path> [--items-per-iteration N] [--reflect-every N] [--max-iterations N] [--compactions-per-iteration N] [--compaction-checkpoint-percent P] [--end-instructions \"TEXT\"|--end-instructions-file PATH]",
 					"warning",
 				);
 				return;
@@ -597,6 +687,10 @@ export default function (pi: ExtensionAPI) {
 				itemsPerIteration: args.itemsPerIteration,
 				reflectEvery: args.reflectEvery,
 				reflectInstructions: args.reflectInstructions,
+				compactionsPerIteration: args.compactionsPerIteration,
+				compactionCheckpointPercent: args.compactionCheckpointPercent,
+				compactionsThisIteration: 0,
+				totalCompactions: 0,
 				endInstructions: args.endInstructions,
 				active: true,
 				status: "active",
@@ -804,6 +898,8 @@ Options:
   --items-per-iteration N       Suggest N items per turn (prompt hint)
   --reflect-every N             Reflect every N iterations
   --max-iterations N            Stop after N iterations (default 50)
+  --compactions-per-iteration N  Checkpoint notes and force a new iteration around N compactions (default 5; 0 disables)
+  --compaction-checkpoint-percent P  Trigger before the Nth compaction at P% context usage (default 90)
   --end-instructions "TEXT"     Show TEXT only after loop completion
   --end-instructions-file PATH  Read completion-only instructions from PATH
 
@@ -871,14 +967,32 @@ Examples:
 			itemsPerIteration: Type.Optional(Type.Integer({ minimum: 0, description: "Suggested items per iteration (0 = no limit)" })),
 			reflectEvery: Type.Optional(Type.Integer({ minimum: 0, description: "Reflect every N iterations (0 = disabled)" })),
 			maxIterations: Type.Optional(Type.Integer({ minimum: 0, description: "Maximum iterations (0 = unlimited)", default: 50 })),
+			compactionsPerIteration: Type.Optional(
+				Type.Integer({
+					minimum: 0,
+					description: "Checkpoint durable notes and force a new iteration around N compactions (0 = disabled)",
+					default: 5,
+				}),
+			),
+			compactionCheckpointPercent: Type.Optional(
+				Type.Number({
+					minimum: 0,
+					maximum: 100,
+					description: "Before the Nth compaction, checkpoint when context usage reaches this percentage",
+					default: 90,
+				}),
+			),
 			endInstructions: Type.Optional(Type.String({ description: "Final-only instructions revealed after completion" })),
 		}),
 		prepareArguments(args): RalphStartInput {
 			if (!args || typeof args !== "object") return args as RalphStartInput;
 			const input = args as Record<string, unknown>;
 			const normalized = { ...input };
-			for (const key of ["itemsPerIteration", "reflectEvery", "maxIterations"] as const) {
+			for (const key of ["itemsPerIteration", "reflectEvery", "maxIterations", "compactionsPerIteration"] as const) {
 				if (typeof input[key] === "number") normalized[key] = nonNegativeInt(input[key], 0);
+			}
+			if (typeof input.compactionCheckpointPercent === "number") {
+				normalized.compactionCheckpointPercent = percentage(input.compactionCheckpointPercent, 90);
 			}
 			return normalized as unknown as RalphStartInput;
 		},
@@ -919,6 +1033,10 @@ Examples:
 				itemsPerIteration: nonNegativeInt(params.itemsPerIteration, 0),
 				reflectEvery: nonNegativeInt(params.reflectEvery, 0),
 				reflectInstructions: DEFAULT_REFLECT_INSTRUCTIONS,
+				compactionsPerIteration: nonNegativeInt(params.compactionsPerIteration, 5),
+				compactionCheckpointPercent: percentage(params.compactionCheckpointPercent, 90),
+				compactionsThisIteration: 0,
+				totalCompactions: 0,
 				endInstructions: params.endInstructions ?? "",
 				active: true,
 				status: "active",
@@ -1034,28 +1152,30 @@ Examples:
 				state.continuationQueued = false;
 			}
 
-			// Increment iteration
-			state.iteration++;
+			if (state.compactionAdvancePending) {
+				queueCompactionCheckpoint(ctx, state);
+				return {
+					content: [{ type: "text", text: "Compaction threshold reached. Durable-notes checkpoint queued before the next iteration." }],
+					details: {},
+					terminate: true,
+				};
+			}
 
-			// Check max iterations
-			if (state.maxIterations > 0 && state.iteration > state.maxIterations) {
-				completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
+			const completedIteration = state.iteration;
+			const advanceResult = advanceIteration(ctx, state);
+			if (advanceResult === "completed") {
 				return {
 					content: [{ type: "text", text: "Max iterations reached. Loop stopped." }],
 					details: {},
 					terminate: true,
 				};
 			}
-
-			const needsReflection = state.reflectEvery > 0 && (state.iteration - 1) % state.reflectEvery === 0;
-			if (needsReflection) state.lastReflectionAt = state.iteration;
-
-			if (!queueContinuation(ctx, state, needsReflection)) {
+			if (advanceResult === "paused") {
 				return { content: [{ type: "text", text: `Could not read task file: ${state.taskFile}. Loop paused.` }], details: {} };
 			}
 
 			return {
-				content: [{ type: "text", text: `Iteration ${state.iteration - 1} complete. Next iteration queued.` }],
+				content: [{ type: "text", text: `Iteration ${completedIteration} complete. Next iteration queued.` }],
 				details: {},
 				terminate: true,
 			};
@@ -1063,6 +1183,45 @@ Examples:
 	});
 
 	// --- Event handlers ---
+
+	pi.on("turn_end", async (_event, ctx) => {
+		if (!currentLoop) return;
+		const state = loadState(ctx, currentLoop);
+		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) {
+			currentLoop = null;
+			updateUI(ctx);
+			return;
+		}
+		if (
+			state.compactionsPerIteration === 0 ||
+			state.compactionCheckpointPercent === 0 ||
+			state.compactionsThisIteration !== state.compactionsPerIteration - 1 ||
+			state.continuationQueued ||
+			state.compactionAdvancePending ||
+			state.compactionCheckpointQueued ||
+			state.compactionCheckpointActive
+		) {
+			return;
+		}
+
+		const usage = ctx.getContextUsage();
+		if (usage?.percent === null || usage?.percent === undefined || usage.percent < state.compactionCheckpointPercent) {
+			return;
+		}
+
+		queueCompactionCheckpoint(
+			ctx,
+			state,
+			"steer",
+			`Context usage reached ${usage.percent.toFixed(1)}% (${usage.tokens?.toLocaleString() ?? "unknown"}/${usage.contextWindow.toLocaleString()} tokens) after ${state.compactionsThisIteration} compactions, so Ralph is checkpointing before compaction ${state.compactionsPerIteration}.`,
+		);
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`Ralph ${state.name}: ${usage.percent.toFixed(1)}% context usage; checkpointing before compaction ${state.compactionsPerIteration}.`,
+				"info",
+			);
+		}
+	});
 
 	pi.on("context", async (event, ctx) => {
 		if (!currentLoop) return;
@@ -1073,7 +1232,20 @@ Examples:
 			return;
 		}
 
-		const boundary = `${CONTINUATION_PREFIX} ${state.name} · iteration`;
+		const checkpointBoundary = `${COMPACTION_CHECKPOINT_PREFIX} ${state.name} · iteration ${state.iteration}\n`;
+		if (
+			state.compactionCheckpointQueued &&
+			event.messages.some((message) =>
+				messageText(message as { role?: string; content?: unknown }).startsWith(checkpointBoundary),
+			)
+		) {
+			state.compactionCheckpointQueued = false;
+			state.compactionCheckpointActive = true;
+			saveState(ctx, state);
+		}
+
+		const iteration = `${state.iteration}${state.maxIterations > 0 ? `/${state.maxIterations}` : ""}`;
+		const boundary = `${CONTINUATION_PREFIX} ${state.name} · iteration ${iteration}\n`;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
 			if (messageText(event.messages[index] as { role?: string; content?: unknown }).startsWith(boundary)) {
 				if (state.continuationQueued) {
@@ -1082,6 +1254,66 @@ Examples:
 				}
 				return { messages: event.messages.slice(index) };
 			}
+		}
+	});
+
+	pi.on("session_compact", async (event, ctx) => {
+		if (!currentLoop) return;
+		const state = loadState(ctx, currentLoop);
+		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) {
+			currentLoop = null;
+			updateUI(ctx);
+			return;
+		}
+
+		state.totalCompactions++;
+
+		// A queued continuation means the next iteration has not started yet. Track
+		// the session-wide compaction, but do not charge it to an iteration that has
+		// not received its continuation boundary.
+		if (
+			state.continuationQueued ||
+			state.compactionCheckpointQueued ||
+			state.compactionCheckpointActive ||
+			state.compactionsPerIteration === 0
+		) {
+			saveState(ctx, state);
+			updateUI(ctx, state);
+			return;
+		}
+
+		state.compactionsThisIteration++;
+		if (state.compactionsThisIteration < state.compactionsPerIteration) {
+			saveState(ctx, state);
+			updateUI(ctx, state);
+			return;
+		}
+
+		const threshold = state.compactionsPerIteration;
+		const compactEvent = event as typeof event & {
+			reason?: "manual" | "threshold" | "overflow";
+			willRetry?: boolean;
+		};
+		const willRetry = compactEvent.willRetry === true;
+		if ((compactEvent.reason !== undefined && compactEvent.reason !== "manual") || willRetry) {
+			state.compactionAdvancePending = true;
+			saveState(ctx, state);
+			updateUI(ctx, state);
+			if (ctx.hasUI) {
+				ctx.ui.notify(
+					`Ralph ${state.name}: compaction limit reached; a fresh iteration will start after the current agent run settles.`,
+					"info",
+				);
+			}
+			return;
+		}
+
+		queueCompactionCheckpoint(ctx, state);
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`Ralph ${state.name}: ${threshold} compaction${threshold === 1 ? "" : "s"} reached; note-taking checkpoint queued.`,
+				"info",
+			);
 		}
 	});
 
@@ -1109,8 +1341,34 @@ Examples:
 			return;
 		}
 
+		if (state.compactionAdvancePending && !state.continuationQueued) {
+			queueCompactionCheckpoint(ctx, state);
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Ralph ${state.name}: compaction recovery settled; note-taking checkpoint queued.`, "info");
+			}
+			return;
+		}
+
+		if (state.compactionCheckpointActive && !state.continuationQueued) {
+			const compactionCount = state.compactionsThisIteration;
+			const completedIteration = state.iteration;
+			const triggerNote = `A fresh iteration was forced after ${compactionCount} compaction${compactionCount === 1 ? "" : "s"} in iteration ${completedIteration}. Durable notes were checkpointed first.`;
+			const advanceResult = advanceIteration(ctx, state, triggerNote);
+			if (advanceResult === "queued" && ctx.hasUI) {
+				ctx.ui.notify(`Ralph ${state.name}: notes checkpointed; forced iteration ${state.iteration}.`, "info");
+			}
+			return;
+		}
+
 		// Check max iterations
-		if (state.maxIterations > 0 && state.iteration >= state.maxIterations) {
+		if (
+			state.maxIterations > 0 &&
+			state.iteration >= state.maxIterations &&
+			!state.continuationQueued &&
+			!state.compactionAdvancePending &&
+			!state.compactionCheckpointQueued &&
+			!state.compactionCheckpointActive
+		) {
 			completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
 			return;
 		}

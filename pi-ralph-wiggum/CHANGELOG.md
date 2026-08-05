@@ -2,9 +2,11 @@
 
 ## Unreleased
 
+### Added
 - Add `ralph_update`, a constrained tool that can replace only the current session-owned loop's managed task ledger, for agents without general project write tools.
-
 - Add `PI_RALPH_STATE_ROOT` so managed Pi workers can keep loop state, generated tasks, and archives in a private runtime directory instead of modifying the project checkout.
+- Track successful Pi compactions in Ralph loop state and expose current/total counts in loop status.
+- Add `compactionsPerIteration` / `--compactions-per-iteration` (default 5) and `compactionCheckpointPercent` / `--compaction-checkpoint-percent` (default 90). After N-1 compactions, Ralph now uses Pi's live context percentage to checkpoint durable notes before compaction N, with the completed Nth compaction retained as a fallback trigger.
 
 ### Changed
 - Replace the tall active-loop widget and duplicate footer status with a single width-safe line showing the loop name, status, and iteration.
