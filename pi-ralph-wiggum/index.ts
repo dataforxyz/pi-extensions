@@ -15,6 +15,7 @@ import { Container, matchesKey, Text, truncateToWidth } from "@earendil-works/pi
 import { Type } from "typebox";
 
 const RALPH_DIR = ".ralph";
+const RALPH_STATE_ROOT_ENV = "PI_RALPH_STATE_ROOT";
 const COMPLETE_MARKER = "<promise>COMPLETE</promise>";
 
 const DEFAULT_TEMPLATE = `# Task
@@ -78,9 +79,16 @@ export default function (pi: ExtensionAPI) {
 
 	// --- File helpers ---
 
-	const ralphDir = (ctx: ExtensionContext) => path.resolve(ctx.cwd, RALPH_DIR);
+	const ralphDir = (ctx: ExtensionContext) => {
+		const configured = process.env[RALPH_STATE_ROOT_ENV]?.trim();
+		return configured ? path.resolve(ctx.cwd, configured) : path.resolve(ctx.cwd, RALPH_DIR);
+	};
 	const archiveDir = (ctx: ExtensionContext) => path.join(ralphDir(ctx), "archive");
 	const sanitize = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_");
+	const defaultTaskFile = (ctx: ExtensionContext, name: string) => {
+		const filePath = path.join(ralphDir(ctx), `${sanitize(name)}.md`);
+		return process.env[RALPH_STATE_ROOT_ENV]?.trim() ? filePath : path.relative(ctx.cwd, filePath);
+	};
 
 	function normalizeLoopName(name: string): string | null {
 		const trimmed = name.trim();
@@ -177,7 +185,7 @@ export default function (pi: ExtensionAPI) {
 
 	// --- State management ---
 
-	function migrateState(raw: Partial<LoopState> & { name: string }): LoopState {
+	function migrateState(ctx: ExtensionContext, raw: Partial<LoopState> & { name: string }): LoopState {
 		const legacy = raw as Partial<LoopState> & {
 			reflectEveryItems?: number;
 			lastReflectionAtItems?: number;
@@ -192,7 +200,7 @@ export default function (pi: ExtensionAPI) {
 		const validStatuses: LoopStatus[] = ["active", "paused", "completed"];
 		if (!raw.status || !validStatuses.includes(raw.status)) raw.status = raw.active ? "active" : "paused";
 		raw.active = raw.status === "active";
-		raw.taskFile = typeof raw.taskFile === "string" ? raw.taskFile : path.join(RALPH_DIR, `${sanitize(raw.name)}.md`);
+		raw.taskFile = typeof raw.taskFile === "string" ? raw.taskFile : defaultTaskFile(ctx, raw.name);
 		raw.iteration = Math.max(1, nonNegativeInt(raw.iteration, 1));
 		raw.maxIterations = nonNegativeInt(raw.maxIterations, 50);
 		raw.itemsPerIteration = nonNegativeInt(raw.itemsPerIteration, 0);
@@ -204,21 +212,21 @@ export default function (pi: ExtensionAPI) {
 		return raw as LoopState;
 	}
 
-	function parseState(content: string | null): LoopState | null {
+	function parseState(ctx: ExtensionContext, content: string | null): LoopState | null {
 		if (!content) return null;
 		try {
 			const parsed: unknown = JSON.parse(content);
 			if (!parsed || typeof parsed !== "object") return null;
 			const raw = parsed as Partial<LoopState> & { name?: unknown };
 			if (typeof raw.name !== "string" || !raw.name.trim()) return null;
-			return migrateState(raw as Partial<LoopState> & { name: string });
+			return migrateState(ctx, raw as Partial<LoopState> & { name: string });
 		} catch {
 			return null;
 		}
 	}
 
 	function loadState(ctx: ExtensionContext, name: string, archived = false): LoopState | null {
-		return parseState(tryRead(getPath(ctx, name, ".state.json", archived)));
+		return parseState(ctx, tryRead(getPath(ctx, name, ".state.json", archived)));
 	}
 
 	function saveState(ctx: ExtensionContext, state: LoopState, archived = false): void {
@@ -240,7 +248,7 @@ export default function (pi: ExtensionAPI) {
 		return fs
 			.readdirSync(dir)
 			.filter((f) => f.endsWith(".state.json"))
-			.map((f) => parseState(tryRead(path.join(dir, f))))
+			.map((f) => parseState(ctx, tryRead(path.join(dir, f))))
 			.filter((s): s is LoopState => s !== null);
 	}
 
@@ -561,7 +569,7 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Loop name must contain at least one letter, number, _ or -.", "warning");
 				return;
 			}
-			const taskFile = isPath ? args.name : path.join(RALPH_DIR, `${loopName}.md`);
+			const taskFile = isPath ? args.name : defaultTaskFile(ctx, loopName);
 
 			const existing = loadState(ctx, loopName);
 			if (existing?.status === "active") {
@@ -745,19 +753,19 @@ export default function (pi: ExtensionAPI) {
 		nuke(rest, ctx) {
 			const force = rest.trim() === "--yes";
 			const warning =
-				"This deletes all .ralph state, task, and archive files. External task files are not removed.";
+				`This deletes all Ralph state, task, and archive files under ${ralphDir(ctx)}. External task files are not removed.`;
 
 			const run = () => {
 				const dir = ralphDir(ctx);
 				if (!fs.existsSync(dir)) {
-					if (ctx.hasUI) ctx.ui.notify("No .ralph directory found.", "info");
+					if (ctx.hasUI) ctx.ui.notify("No Ralph state directory found.", "info");
 					return;
 				}
 
 				currentLoop = null;
 				const ok = tryRemoveDir(dir);
 				if (ctx.hasUI) {
-					ctx.ui.notify(ok ? "Removed .ralph directory." : "Failed to remove .ralph directory.", ok ? "info" : "error");
+					ctx.ui.notify(ok ? "Removed Ralph state directory." : "Failed to remove Ralph state directory.", ok ? "info" : "error");
 				}
 				updateUI(ctx);
 			};
@@ -882,7 +890,7 @@ Examples:
 					details: {},
 				};
 			}
-			const taskFile = path.join(RALPH_DIR, `${loopName}.md`);
+			const taskFile = defaultTaskFile(ctx, loopName);
 
 			const existing = loadState(ctx, loopName);
 			if (existing?.status === "active") {

@@ -8,8 +8,12 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url);
 const extension = await jiti.import("./index.ts", { default: true });
 
-function createHarness() {
+function createHarness(options = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "ralph-review-"));
+	const previousStateRoot = process.env.PI_RALPH_STATE_ROOT;
+	const stateRoot = options.stateRoot ?? join(cwd, ".ralph");
+	if (options.stateRoot) process.env.PI_RALPH_STATE_ROOT = options.stateRoot;
+	else delete process.env.PI_RALPH_STATE_ROOT;
 	const commands = new Map();
 	const tools = new Map();
 	const events = new Map();
@@ -74,6 +78,7 @@ function createHarness() {
 
 	return {
 		cwd,
+		stateRoot,
 		commands,
 		tools,
 		events,
@@ -93,7 +98,12 @@ function createHarness() {
 		setSessionId(value) {
 			sessionId = value;
 		},
-		cleanup: () => rmSync(cwd, { recursive: true, force: true }),
+		cleanup: () => {
+			rmSync(cwd, { recursive: true, force: true });
+			if (options.stateRoot) rmSync(options.stateRoot, { recursive: true, force: true });
+			if (previousStateRoot === undefined) delete process.env.PI_RALPH_STATE_ROOT;
+			else process.env.PI_RALPH_STATE_ROOT = previousStateRoot;
+		},
 	};
 }
 
@@ -115,7 +125,7 @@ async function startLoop(harness, overrides = {}) {
 }
 
 function readState(harness, name) {
-	return JSON.parse(readFileSync(join(harness.cwd, ".ralph", `${name}.state.json`), "utf8"));
+	return JSON.parse(readFileSync(join(harness.stateRoot, `${name}.state.json`), "utf8"));
 }
 
 async function consumeContinuation(harness, promptIndex = harness.prompts.length - 1) {
@@ -125,6 +135,21 @@ async function consumeContinuation(harness, promptIndex = harness.prompts.length
 		harness.ctx,
 	);
 }
+
+test("configured state root keeps loop state and task files out of the project", async () => {
+	const privateRoot = mkdtempSync(join(tmpdir(), "ralph-private-state-"));
+	const h = createHarness({ stateRoot: privateRoot });
+	try {
+		await startLoop(h);
+		assert.equal(existsSync(join(h.cwd, ".ralph")), false);
+		assert.equal(existsSync(join(privateRoot, "review-loop.md")), true);
+		assert.equal(existsSync(join(privateRoot, "review-loop.state.json")), true);
+		assert.equal(readState(h, "review-loop").taskFile, join(privateRoot, "review-loop.md"));
+		assert.equal(h.prompts[0].includes(`Read ${join(privateRoot, "review-loop.md")}`), true);
+	} finally {
+		h.cleanup();
+	}
+});
 
 test("continuation prompts stay small and never replay task contents", async () => {
 	const h = createHarness();
