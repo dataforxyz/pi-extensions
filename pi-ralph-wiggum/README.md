@@ -111,7 +111,7 @@ ralph_start({
 
 Normal continuation prompts are deliberately small: loop name, iteration, task-file path, and an optional reflection instruction. Before each model call, Ralph slices context at the latest continuation boundary, so prior iterations and the conversation that started the loop are not sent to the model. The task file is the only cross-iteration working memory. The Pi transcript remains available for audit, but it is excluded from the next iteration's model context.
 
-If neither `read` nor `bash` is active, Ralph embeds a task snapshot so restricted/custom tool configurations still work. Successful `ralph_start` and `ralph_done` calls terminate their tool turn after queuing the fresh-context continuation, avoiding an extra summary response.
+If neither `read` nor `bash` is active, Ralph embeds a task snapshot so restricted/custom tool configurations still work. The constrained `ralph_update` tool replaces only the current session-owned loop's managed task ledger, allowing read-only project roles to record progress without general file-write access. Successful `ralph_start` and `ralph_done` calls terminate their tool turn after queuing the fresh-context continuation, avoiding an extra summary response.
 
 `endInstructions` are stored in Ralph state, not inserted into normal iteration prompts or the task file. When the assistant emits `<promise>COMPLETE</promise>` or the loop otherwise ends through Ralph completion handling, the extension sends a follow-up only when hidden end instructions actually exist. A normal completion without end instructions does not spend another model turn.
 

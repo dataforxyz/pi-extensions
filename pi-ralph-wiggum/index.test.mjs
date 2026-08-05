@@ -254,10 +254,64 @@ test("getActiveTools loader errors fall back to a snapshot instead of pausing", 
 	}
 });
 
+test("ralph_update replaces only the active session-owned task ledger", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		const replacement = "# Task\n\n## Checklist\n- [x] Review\n\n## Notes\n- Scout evidence captured";
+		const result = await h.tools.get("ralph_update").execute(
+			"call-update",
+			{ taskContent: replacement },
+			undefined,
+			undefined,
+			h.ctx,
+		);
+		assert.match(result.content[0].text, /Updated Ralph task ledger/);
+		assert.equal(readFileSync(join(h.stateRoot, "review-loop.md"), "utf8"), replacement);
+
+		h.setSessionId("different-session");
+		const denied = await h.tools.get("ralph_update").execute(
+			"call-denied",
+			{ taskContent: "must not write" },
+			undefined,
+			undefined,
+			h.ctx,
+		);
+		assert.match(denied.content[0].text, /owned by other session/);
+		assert.equal(readFileSync(join(h.stateRoot, "review-loop.md"), "utf8"), replacement);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("ralph_update rejects an active ledger outside the managed Ralph state root", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		const statePath = join(h.stateRoot, "review-loop.state.json");
+		const state = readState(h, "review-loop");
+		state.taskFile = join(h.cwd, "outside.md");
+		const { writeFileSync } = await import("node:fs");
+		writeFileSync(statePath, JSON.stringify(state));
+		const result = await h.tools.get("ralph_update").execute(
+			"call-outside",
+			{ taskContent: "must not write" },
+			undefined,
+			undefined,
+			h.ctx,
+		);
+		assert.match(result.content[0].text, /outside the managed Ralph state root/);
+		assert.equal(existsSync(join(h.cwd, "outside.md")), false);
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("state-mutating Ralph tools require sequential execution", () => {
 	const h = createHarness();
 	try {
 		assert.equal(h.tools.get("ralph_start").executionMode, "sequential");
+		assert.equal(h.tools.get("ralph_update").executionMode, "sequential");
 		assert.equal(h.tools.get("ralph_done").executionMode, "sequential");
 	} finally {
 		h.cleanup();
