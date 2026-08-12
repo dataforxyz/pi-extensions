@@ -6,7 +6,8 @@ Safe runtime reloads for [Pi](https://github.com/earendil-works/pi):
 - `/reload-queue` waits for active agent work to settle and then runs that same runtime reload without injecting a slash command into model context.
 - `reload_runtime` prepares `/reload-queue` in an interactive editor for explicit operator submission.
 - `reload_runtime({ target: "worker" })` sends a structured Agent Intercom control to a managed Pi worker; current Pi versions require an operator in that worker session to submit the prepared `/reload-queue` command.
-- A footer status shows the last successful reload time and source.
+- A footer status shows when the current Pi process started or the runtime last reloaded.
+- While `/reload-queue` is waiting for the idle boundary, the footer shows an accent-colored queued state.
 
 The status and persistence marker are deliberately out of LLM context: the footer uses `ctx.ui.setStatus()`, and the timestamp uses `pi.appendEntry()`.
 
@@ -100,13 +101,20 @@ Manager ownership is resolved for every request. The extension reads the current
 
 ## Footer and persistence
 
-After a successful reload the footer shows, for example:
+When a Pi process starts or the runtime reloads successfully, the footer shows the event time and source, for example:
 
 ```text
-reload: 2:41:08 PM · manual
+reload: 2:41:08 PM · startup
+reload: 3:05:12 PM · manual
 ```
 
-The marker persists in the session JSONL but does not participate in model context. Failed reloads do not advance the successful timestamp.
+After `/reload-queue` is submitted and while it waits for active work to settle, the footer switches to an accent-colored state:
+
+```text
+reload: queued · 3:05:10 PM
+```
+
+Startup and successful-reload markers persist in the session JSONL but do not participate in model context. A failed queued reload restores the latest successful marker instead of advancing it.
 
 ## Flags
 

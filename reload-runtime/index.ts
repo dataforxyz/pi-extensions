@@ -23,7 +23,7 @@ const REMOTE_RESULT_ENTRY = "reload-runtime-remote-result";
 const DELIVERY_TIMEOUT_MS = 15_000;
 const FRESH_ATTEMPT_MS = 60_000;
 
-type ReloadSource = "manual" | "agent" | "manager" | "external";
+type ReloadSource = "manual" | "agent" | "manager" | "external" | "startup";
 type ReloadResultStatus = "queued" | "completed" | "rejected" | "failed";
 
 interface ControlEnvelope {
@@ -395,6 +395,33 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY, `reload: ${formatTimestamp(marker.timestamp)} · ${marker.source}`);
 	}
 
+	function showQueuedStatus(ctx: ExtensionContext, requestedAt: number): void {
+		if (!ctx.hasUI) return;
+		ctx.ui.setStatus(
+			STATUS_KEY,
+			ctx.ui.theme.fg("accent", `reload: queued · ${formatTimestamp(requestedAt)}`),
+		);
+	}
+
+	function restoreLatestMarker(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return;
+		const marker = latestMarker(ctx.sessionManager.getEntries() as CustomEntry[]);
+		ctx.ui.setStatus(
+			STATUS_KEY,
+			marker ? `reload: ${formatTimestamp(marker.timestamp)} · ${marker.source}` : undefined,
+		);
+	}
+
+	function recordStartup(ctx: ExtensionContext): void {
+		const marker: ReloadMarker = {
+			attemptId: randomUUID(),
+			timestamp: Date.now(),
+			source: "startup",
+		};
+		pi.appendEntry(MARKER_ENTRY, marker);
+		showMarker(ctx, marker);
+	}
+
 	function schedule(callback: () => void): void {
 		const timer = setTimeout(() => {
 			timers.delete(timer);
@@ -572,19 +599,26 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 				}
 				return;
 			}
-			const queued = stageReload({
+			const request: PendingReload = {
 				attemptId: randomUUID(),
 				source: "manual",
 				requestedAt: Date.now(),
-			});
+			};
+			const queued = stageReload(request);
 			if (!queued) {
 				if (ctx.hasUI) ctx.ui.notify("A runtime reload is already waiting for the idle boundary.", "info");
 				return;
 			}
+			showQueuedStatus(ctx, request.requestedAt);
 			if (ctx.hasUI) {
 				ctx.ui.notify("Runtime reload will run after the current agent work settles.", "info");
 			}
-			await executePendingReload(ctx);
+			try {
+				await executePendingReload(ctx);
+			} catch (error) {
+				restoreLatestMarker(ctx);
+				throw error;
+			}
 		},
 	});
 
@@ -711,6 +745,10 @@ export default function reloadRuntimeExtension(pi: ExtensionAPI) {
 		registerControlTypes();
 		if (event.reason === "reload") {
 			await completeSuccessfulReload(ctx);
+			return;
+		}
+		if (event.reason === "startup") {
+			recordStartup(ctx);
 			return;
 		}
 		const marker = latestMarker(ctx.sessionManager.getEntries() as CustomEntry[]);
