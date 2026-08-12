@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Record and display a fresh `startup` footer marker whenever a new Pi process opens the session, rather than leaving a stale reload timestamp from an earlier process.
+- Show an accent-colored `reload: queued` footer status immediately after `/reload-queue` is submitted, restoring the latest successful marker if the reload fails.
 - Fix `/reload-queue` leaking its private executor into model context. The command now waits for `ctx.waitForIdle()` and reloads directly from its command context without `pi.sendUserMessage()`.
 - Make agent- and manager-triggered reload requests fail safely or prepare `/reload-queue` for an interactive operator when the current Pi API cannot perform a deferred reload from tool/event context.
 - Remove the redundant public `/reload-runtime` slash command. Operators now use Pi's built-in `/reload` when idle and `/reload-queue` while busy.

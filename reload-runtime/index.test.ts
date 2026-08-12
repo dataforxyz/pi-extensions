@@ -75,6 +75,11 @@ function createHarness(sharedEntries: CustomEntry[] = [], options: {
 		mode: options.mode ?? "rpc",
 		hasUI: options.mode !== "json" && options.mode !== "print",
 		ui: {
+			theme: {
+				fg(color: string, text: string) {
+					return `<${color}>${text}</${color}>`;
+				},
+			},
 			setStatus(key: string, value: string | undefined) {
 				statuses.push({ key, value });
 			},
@@ -158,6 +163,24 @@ test("owning manager resolution follows the current orchestrator registry", asyn
 	}
 });
 
+test("process startup records and displays a fresh startup marker", async () => {
+	const yesterday = Date.now() - 86_400_000;
+	const entries: CustomEntry[] = [{
+		type: "custom",
+		customType: "reload-runtime-marker",
+		data: { attemptId: "old", timestamp: yesterday, source: "manual" },
+	}];
+	const harness = createHarness(entries, { mode: "tui" });
+	reloadRuntimeExtension(harness.pi as never);
+
+	await harness.emitLifecycle("session_start", { reason: "startup" });
+
+	const markers = customEntries(harness.entries, "reload-runtime-marker");
+	assert.equal(markers.length, 2);
+	assert.equal((markers.at(-1)?.data as any).source, "startup");
+	assert.match(harness.statuses.at(-1)?.value ?? "", /reload: .* · startup/);
+});
+
 test("self reload prepares an operator command without injecting it into model context", async () => {
 	const harness = createHarness([], { mode: "tui" });
 	reloadRuntimeExtension(harness.pi as never);
@@ -189,10 +212,14 @@ test("manual reload queue waits for idle directly without injecting a slash comm
 	assert.equal(harness.sentUserMessages.length, 0);
 	assert.equal(customEntries(harness.entries, "reload-runtime-attempt").length, 1);
 	assert.match(harness.notifications.at(-1)?.message ?? "", /after the current agent work settles/);
+	assert.match(harness.statuses.at(-1)?.value ?? "", /^<accent>reload: queued · /);
 
 	releaseIdle();
 	await reload;
 	assert.equal(harness.reloads, 1);
+	await harness.emitLifecycle("session_start", { reason: "reload" });
+	assert.match(harness.statuses.at(-1)?.value ?? "", /reload: .* · manual/);
+	assert.doesNotMatch(harness.statuses.at(-1)?.value ?? "", /<accent>/);
 
 	await harness.commands.get("reload-queue")!("--execute=stale", harness.ctx);
 	assert.equal(harness.reloads, 1);
@@ -339,6 +366,7 @@ test("reload failures persist failure state and release single-flight state", as
 		/reload broke/,
 	);
 	assert.equal((customEntries(harness.entries, "reload-runtime-completion").at(-1)?.data as any).status, "failed");
+	assert.match(harness.statuses.at(-1)?.value ?? "", / · startup$/);
 
 	await assert.rejects(
 		async () => {
