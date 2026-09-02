@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Show the last successful model-context reset time in the active-loop widget and `/ralph status` details.
 - Add `ralph_update`, a constrained tool that can replace only the current session-owned loop's managed task ledger, for agents without general project write tools.
 - Add `PI_RALPH_STATE_ROOT` so managed Pi workers can keep loop state, generated tasks, and archives in a private runtime directory instead of modifying the project checkout.
 - Track successful Pi compactions in Ralph loop state and expose current/total counts in loop status.
