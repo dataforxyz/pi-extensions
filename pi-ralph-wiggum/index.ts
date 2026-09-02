@@ -72,6 +72,7 @@ interface LoopState {
 	status: LoopStatus;
 	startedAt: string;
 	completedAt?: string;
+	lastContextResetAt?: string; // When Ralph last sliced the model context at an iteration boundary
 	lastReflectionAt: number; // Last iteration we reflected at
 	continuationQueued?: boolean; // True while a Ralph continuation prompt is already queued
 	compactionAdvancePending?: boolean; // Threshold reached during auto-compaction; checkpoint once the agent settles
@@ -226,6 +227,7 @@ export default function (pi: ExtensionAPI) {
 		raw.totalCompactions = nonNegativeInt(raw.totalCompactions, raw.compactionsThisIteration);
 		raw.endInstructions = typeof raw.endInstructions === "string" ? raw.endInstructions : "";
 		raw.startedAt = typeof raw.startedAt === "string" ? raw.startedAt : "";
+		raw.lastContextResetAt = typeof raw.lastContextResetAt === "string" ? raw.lastContextResetAt : undefined;
 		raw.lastReflectionAt = nonNegativeInt(raw.lastReflectionAt, 0);
 		return raw as LoopState;
 	}
@@ -348,6 +350,7 @@ export default function (pi: ExtensionAPI) {
 			state.compactionsPerIteration > 0
 				? `· C ${state.compactionsThisIteration}/${state.compactionsPerIteration}`
 				: "";
+		const contextResetStr = `· reset ${formatTime(state.lastContextResetAt)}`;
 		ctx.ui.setWidget("ralph", (_tui, theme) => ({
 			render(width: number): string[] {
 				const summary = [
@@ -355,6 +358,7 @@ export default function (pi: ExtensionAPI) {
 					theme.fg("muted", `· ${state.name}`),
 					theme.fg("dim", `· ${STATUS_ICONS[state.status]} ${state.iteration}${maxStr}`),
 					compactionStr ? theme.fg("dim", compactionStr) : "",
+					theme.fg("dim", contextResetStr),
 					theme.fg("dim", "· /ralph status"),
 				]
 					.filter(Boolean)
@@ -373,6 +377,12 @@ export default function (pi: ExtensionAPI) {
 		return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleString();
 	}
 
+	function formatTime(timestamp: string | undefined): string {
+		if (!timestamp) return "—";
+		const date = new Date(timestamp);
+		return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleTimeString();
+	}
+
 	function getLoopDetails(ctx: ExtensionContext, state: LoopState): LoopDetail[] {
 		const maxStr = state.maxIterations > 0 ? `/${state.maxIterations}` : "";
 		const details: LoopDetail[] = [
@@ -382,6 +392,7 @@ export default function (pi: ExtensionAPI) {
 			["Task", state.taskFile],
 			["Owner", formatOwner(ctx, state)],
 			["Started", formatTimestamp(state.startedAt)],
+			["Context reset", formatTimestamp(state.lastContextResetAt)],
 		];
 		if (state.itemsPerIteration > 0) details.push(["Pacing", `~${state.itemsPerIteration} items per iteration`]);
 		if (state.reflectEvery > 0) {
@@ -1248,10 +1259,10 @@ Examples:
 		const boundary = `${CONTINUATION_PREFIX} ${state.name} · iteration ${iteration}\n`;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
 			if (messageText(event.messages[index] as { role?: string; content?: unknown }).startsWith(boundary)) {
-				if (state.continuationQueued) {
-					state.continuationQueued = false;
-					saveState(ctx, state);
-				}
+				if (state.continuationQueued) state.continuationQueued = false;
+				state.lastContextResetAt = new Date().toISOString();
+				saveState(ctx, state);
+				updateUI(ctx, state);
 				return { messages: event.messages.slice(index) };
 			}
 		}

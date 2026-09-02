@@ -202,6 +202,27 @@ test("each continuation resets model context to the latest iteration boundary", 
 	}
 });
 
+test("context reset records its time in the status widget and details", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		await consumeContinuation(h);
+
+		const state = readState(h, "review-loop");
+		assert.ok(state.lastContextResetAt);
+		assert.equal(Number.isNaN(new Date(state.lastContextResetAt).getTime()), false);
+		const widget = h.widgets.at(-1).value(undefined, h.ctx.ui.theme);
+		assert.doesNotMatch(widget.render(1_000)[0], /reset —/);
+
+		h.ctx.mode = "json";
+		await h.commands.get("ralph").handler("status review-loop", h.ctx);
+		assert.match(h.notifications.at(-1).message, /Context reset:/);
+		assert.doesNotMatch(h.notifications.at(-1).message, /Context reset: —/);
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("context reset selects the newest boundary and retains the current iteration", async () => {
 	const h = createHarness();
 	try {
