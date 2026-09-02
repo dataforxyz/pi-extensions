@@ -21,6 +21,7 @@
 - Add focused integration tests for prompt size, resume semantics, loop switching, completion turns, validation, and state writes.
 
 ### Fixed
+- Record the last context-reset time only when a queued continuation begins, rather than falsely refreshing it on every model call in the same iteration.
 - Clear stale in-memory/UI loop state if the active loop disappears, pauses, or is reclaimed by another session while context is being prepared.
 - Run state-mutating Ralph tools sequentially so sibling tool calls cannot race iteration or ownership state.
 - Ignore malformed Ralph state files instead of letting one corrupt JSON file break status listing or session startup.

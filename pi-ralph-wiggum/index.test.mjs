@@ -211,8 +211,14 @@ test("context reset records its time in the status widget and details", async ()
 		const state = readState(h, "review-loop");
 		assert.ok(state.lastContextResetAt);
 		assert.equal(Number.isNaN(new Date(state.lastContextResetAt).getTime()), false);
+		const firstResetAt = state.lastContextResetAt;
 		const widget = h.widgets.at(-1).value(undefined, h.ctx.ui.theme);
 		assert.doesNotMatch(widget.render(1_000)[0], /reset —/);
+
+		// The continuation boundary is retained for all model calls in this
+		// iteration. Reprocessing it must not falsely report another reset.
+		await consumeContinuation(h);
+		assert.equal(readState(h, "review-loop").lastContextResetAt, firstResetAt);
 
 		h.ctx.mode = "json";
 		await h.commands.get("ralph").handler("status review-loop", h.ctx);

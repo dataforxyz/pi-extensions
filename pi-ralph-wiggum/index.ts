@@ -1259,10 +1259,16 @@ Examples:
 		const boundary = `${CONTINUATION_PREFIX} ${state.name} · iteration ${iteration}\n`;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
 			if (messageText(event.messages[index] as { role?: string; content?: unknown }).startsWith(boundary)) {
-				if (state.continuationQueued) state.continuationQueued = false;
-				state.lastContextResetAt = new Date().toISOString();
-				saveState(ctx, state);
-				updateUI(ctx, state);
+				// Pi prepares context before every model call. This boundary only represents
+				// a new Ralph iteration while its queued-continuation guard is set; after
+				// that, it remains in the retained iteration context and must not rewrite
+				// state or make the last-reset timestamp look freshly reset.
+				if (state.continuationQueued) {
+					state.continuationQueued = false;
+					state.lastContextResetAt = new Date().toISOString();
+					saveState(ctx, state);
+					updateUI(ctx, state);
+				}
 				return { messages: event.messages.slice(index) };
 			}
 		}
