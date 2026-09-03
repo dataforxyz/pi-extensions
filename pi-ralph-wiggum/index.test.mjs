@@ -426,6 +426,27 @@ test("compaction checkpointing defaults to five compactions", async () => {
 	}
 });
 
+test("90% context usage checkpoints before any compaction", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		await consumeContinuation(h);
+		const turnEnd = h.events.get("turn_end")[0];
+		h.setContextUsage({ tokens: 244_800, contextWindow: 272_000, percent: 90 });
+		await turnEnd({}, h.ctx);
+
+		const state = readState(h, "review-loop");
+		assert.equal(state.compactionsThisIteration, 0);
+		assert.equal(state.compactionCheckpointQueued, true);
+		assert.equal(h.prompts.length, 2);
+		assert.match(h.prompts[1], /90\.0% \(244,800\/272,000 tokens\) with no compaction yet/i);
+		assert.match(h.prompts[1], /checkpointing before the context fills/i);
+		assert.ok(h.notifications.some(({ message }) => /no compaction yet; checkpointing before the context fills/i.test(message)));
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("after four compactions, 90% context usage checkpoints before the fifth", async () => {
 	const h = createHarness();
 	try {
@@ -600,6 +621,7 @@ test("a compaction-forced advance respects max iterations", async () => {
 		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "checkpoint saved" }] }] }, h.ctx);
 		const state = readState(h, "review-loop");
 		assert.equal(state.status, "completed");
+		assert.equal(state.iteration, 1);
 		assert.equal(state.totalCompactions, 1);
 		assert.equal(h.prompts.length, 2);
 	} finally {
@@ -704,9 +726,11 @@ test("max iterations completes without an extra turn", async () => {
 	try {
 		await startLoop(h, { maxIterations: 1 });
 		await consumeContinuation(h);
-		const agentEnd = h.events.get("agent_end")[0];
-		await agentEnd({ messages: [{ role: "assistant", content: [{ type: "text", text: "work done" }] }] }, h.ctx);
-		assert.equal(readState(h, "review-loop").status, "completed");
+		const result = await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+		const state = readState(h, "review-loop");
+		assert.match(result.content[0].text, /Max iterations reached/);
+		assert.equal(state.status, "completed");
+		assert.equal(state.iteration, 1);
 		assert.equal(h.prompts.length, 1);
 	} finally {
 		h.cleanup();

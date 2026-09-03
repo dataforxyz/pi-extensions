@@ -64,7 +64,7 @@ interface LoopState {
 	reflectEvery: number; // Reflect every N iterations
 	reflectInstructions: string;
 	compactionsPerIteration: number; // Checkpoint notes and force the next iteration after N compactions (0 disables)
-	compactionCheckpointPercent: number; // Preempt before the Nth compaction at this context usage percentage
+	compactionCheckpointPercent: number; // Checkpoint before context fills at this usage percentage
 	compactionsThisIteration: number;
 	totalCompactions: number;
 	endInstructions: string; // Only shown after the loop emits COMPLETE_MARKER / ends
@@ -402,7 +402,7 @@ export default function (pi: ExtensionAPI) {
 		if (state.compactionsPerIteration > 0) {
 			details.push([
 				"Compactions",
-				`${state.compactionsThisIteration}/${state.compactionsPerIteration} this iteration · ${state.totalCompactions} total · checkpoint at ${state.compactionCheckpointPercent}% before #${state.compactionsPerIteration}`,
+				`${state.compactionsThisIteration}/${state.compactionsPerIteration} this iteration · ${state.totalCompactions} total · checkpoint at ${state.compactionCheckpointPercent}% before context fills · #${state.compactionsPerIteration} fallback`,
 			]);
 		} else if (state.totalCompactions > 0) {
 			details.push(["Compactions", `${state.totalCompactions} total (forcing disabled)`]);
@@ -555,16 +555,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function advanceIteration(ctx: ExtensionContext, state: LoopState, triggerNote?: string): "queued" | "completed" | "paused" {
+		if (state.maxIterations > 0 && state.iteration >= state.maxIterations) {
+			completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
+			return "completed";
+		}
+
 		state.iteration++;
 		state.compactionsThisIteration = 0;
 		state.compactionAdvancePending = false;
 		state.compactionCheckpointQueued = false;
 		state.compactionCheckpointActive = false;
-
-		if (state.maxIterations > 0 && state.iteration > state.maxIterations) {
-			completeLoop(ctx, state, `max iterations (${state.maxIterations}) reached`, "warning");
-			return "completed";
-		}
 
 		const needsReflection = state.reflectEvery > 0 && (state.iteration - 1) % state.reflectEvery === 0;
 		if (needsReflection) state.lastReflectionAt = state.iteration;
@@ -910,7 +910,7 @@ Options:
   --reflect-every N             Reflect every N iterations
   --max-iterations N            Stop after N iterations (default 50)
   --compactions-per-iteration N  Checkpoint notes and force a new iteration around N compactions (default 5; 0 disables)
-  --compaction-checkpoint-percent P  Trigger before the Nth compaction at P% context usage (default 90)
+  --compaction-checkpoint-percent P  Checkpoint before context fills at P% usage (default 90)
   --end-instructions "TEXT"     Show TEXT only after loop completion
   --end-instructions-file PATH  Read completion-only instructions from PATH
 
@@ -989,7 +989,7 @@ Examples:
 				Type.Number({
 					minimum: 0,
 					maximum: 100,
-					description: "Before the Nth compaction, checkpoint when context usage reaches this percentage",
+					description: "Checkpoint durable notes before context fills when usage reaches this percentage",
 					default: 90,
 				}),
 			),
@@ -1206,7 +1206,6 @@ Examples:
 		if (
 			state.compactionsPerIteration === 0 ||
 			state.compactionCheckpointPercent === 0 ||
-			state.compactionsThisIteration !== state.compactionsPerIteration - 1 ||
 			state.continuationQueued ||
 			state.compactionAdvancePending ||
 			state.compactionCheckpointQueued ||
@@ -1220,17 +1219,17 @@ Examples:
 			return;
 		}
 
-		queueCompactionCheckpoint(
-			ctx,
-			state,
-			"steer",
-			`Context usage reached ${usage.percent.toFixed(1)}% (${usage.tokens?.toLocaleString() ?? "unknown"}/${usage.contextWindow.toLocaleString()} tokens) after ${state.compactionsThisIteration} compactions, so Ralph is checkpointing before compaction ${state.compactionsPerIteration}.`,
-		);
+		const checkpointReason =
+			state.compactionsThisIteration > 0
+				? `Context usage reached ${usage.percent.toFixed(1)}% (${usage.tokens?.toLocaleString() ?? "unknown"}/${usage.contextWindow.toLocaleString()} tokens) after ${state.compactionsThisIteration} compactions, so Ralph is checkpointing before compaction ${state.compactionsPerIteration}.`
+				: `Context usage reached ${usage.percent.toFixed(1)}% (${usage.tokens?.toLocaleString() ?? "unknown"}/${usage.contextWindow.toLocaleString()} tokens) with no compaction yet, so Ralph is checkpointing before the context fills.`;
+		queueCompactionCheckpoint(ctx, state, "steer", checkpointReason);
 		if (ctx.hasUI) {
-			ctx.ui.notify(
-				`Ralph ${state.name}: ${usage.percent.toFixed(1)}% context usage; checkpointing before compaction ${state.compactionsPerIteration}.`,
-				"info",
-			);
+			const checkpointNotice =
+				state.compactionsThisIteration > 0
+					? `Ralph ${state.name}: ${usage.percent.toFixed(1)}% context usage; checkpointing before compaction ${state.compactionsPerIteration}.`
+					: `Ralph ${state.name}: ${usage.percent.toFixed(1)}% context usage with no compaction yet; checkpointing before the context fills.`;
+			ctx.ui.notify(checkpointNotice, "info");
 		}
 	});
 

@@ -7,7 +7,7 @@
 - Add `ralph_update`, a constrained tool that can replace only the current session-owned loop's managed task ledger, for agents without general project write tools.
 - Add `PI_RALPH_STATE_ROOT` so managed Pi workers can keep loop state, generated tasks, and archives in a private runtime directory instead of modifying the project checkout.
 - Track successful Pi compactions in Ralph loop state and expose current/total counts in loop status.
-- Add `compactionsPerIteration` / `--compactions-per-iteration` (default 5) and `compactionCheckpointPercent` / `--compaction-checkpoint-percent` (default 90). After N-1 compactions, Ralph now uses Pi's live context percentage to checkpoint durable notes before compaction N, with the completed Nth compaction retained as a fallback trigger.
+- Add `compactionsPerIteration` / `--compactions-per-iteration` (default 5) and `compactionCheckpointPercent` / `--compaction-checkpoint-percent` (default 90). Ralph uses Pi's live context percentage to checkpoint durable notes before the context fills, with the completed Nth compaction retained as a fallback trigger.
 
 ### Changed
 - Replace the tall active-loop widget and duplicate footer status with a single width-safe line showing the loop name, status, and iteration.
@@ -21,6 +21,9 @@
 - Add focused integration tests for prompt size, resume semantics, loop switching, completion turns, validation, and state writes.
 
 ### Fixed
+- Arm the context-usage checkpoint even before the first compaction, so long-context models checkpoint durable notes before an iteration fills their window.
+- Keep completed loops at their configured maximum iteration (N/N), rather than incrementing state to N+1/N while finalizing.
+- Document the unavoidable queued-follow-up limitation when an agent emits `COMPLETE` after calling `ralph_done` in the same run: Pi has no follow-up cancellation API, so that already queued message may still run.
 - Record the last context-reset time only when a queued continuation begins, rather than falsely refreshing it on every model call in the same iteration.
 - Clear stale in-memory/UI loop state if the active loop disappears, pauses, or is reclaimed by another session while context is being prepared.
 - Run state-mutating Ralph tools sequentially so sibling tool calls cannot race iteration or ownership state.

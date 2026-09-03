@@ -48,7 +48,7 @@ You ask Pi to set up a ralph-wiggum loop.
   - Every iteration gets a fresh model context. Ralph removes all messages before the latest iteration boundary and restores state from `.ralph/<name>.md`.
   - The short continuation points to that file instead of replaying its full contents. The agent reads and updates it, works on unblocked items, and calls `ralph_done` only when another useful iteration can start.
   - If background work blocks the next item, it records what is pending and stops instead of burning iterations to poll.
-  - Ralph tracks successful `/compact`, threshold, and overflow compactions. By default, after 4 compactions it watches live context usage; at 90% it queues a note-taking checkpoint before compaction 5, asks the agent to save durable progress/decision/verification/blocker/next-step notes in the task file, and then forces the next iteration. The fifth compaction remains a fallback trigger if usage crosses too quickly.
+  - Ralph watches live context usage after each turn. By default, at 90% it queues a note-taking checkpoint before the context fills, asks the agent to save durable progress/decision/verification/blocker/next-step notes in the task file, and then forces the next iteration. It also tracks successful `/compact`, threshold, and overflow compactions; compaction 5 remains a fallback trigger if usage crosses too quickly.
 - Pi runs until either:
   - All tasks are done (Pi sends `<promise>COMPLETE</promise>`)
   - Max iterations (default 50)
@@ -80,7 +80,7 @@ While a loop is active, Ralph uses a single width-safe line above the editor sho
 | `--items-per-iteration N` | Suggest N items per turn (prompt hint) |
 | `--reflect-every N` | Reflect every N iterations |
 | `--compactions-per-iteration N` | Target the Nth compaction for checkpoint/iteration rollover (default `5`; `0` disables) |
-| `--compaction-checkpoint-percent P` | After N-1 compactions, checkpoint at P% live context usage (default `90`) |
+| `--compaction-checkpoint-percent P` | Checkpoint at P% live context usage before the context fills (default `90`; `0` disables) |
 | `--end-instructions "TEXT"` | Store instructions that are revealed only after the loop ends/completes |
 | `--end-instructions-file PATH` | Read completion-only instructions from a file |
 
@@ -117,7 +117,7 @@ ralph_start({
 
 Normal continuation prompts are deliberately small: loop name, iteration, task-file path, and an optional reflection instruction. Before each model call, Ralph slices context at the latest continuation boundary, so prior iterations and the conversation that started the loop are not sent to the model. The task file is the only cross-iteration working memory. The Pi transcript remains available for audit, but it is excluded from the next iteration's model context.
 
-Ralph records both the total number of session compactions and the number charged to the current iteration. `compactionsPerIteration` defaults to `5`, and `compactionCheckpointPercent` defaults to `90`. After compaction 4, Ralph reads Pi's live `ctx.getContextUsage()` values (`tokens`, `contextWindow`, and `percent`) after each turn. At 90% usage it steers in a dedicated checkpoint before compaction 5 and tells the agent to update the canonical task file with durable notes: progress, decisions, changed files, verification results, blockers, and next steps. When that checkpoint turn ends, Ralph automatically forces the fresh iteration and resets the per-iteration count. If compaction 5 happens before the watermark hook can run, the completed compaction still triggers the same checkpoint as a fallback. Compactions that happen while a continuation or checkpoint is already queued still count toward the session total, but do not skip work. `/ralph status` shows the tracking totals, watermark, and active count.
+Ralph records both the total number of session compactions and the number charged to the current iteration. `compactionsPerIteration` defaults to `5`, and `compactionCheckpointPercent` defaults to `90`. Ralph reads Pi's live `ctx.getContextUsage()` values (`tokens`, `contextWindow`, and `percent`) after each turn; at 90% usage it steers in a dedicated checkpoint before the context fills and tells the agent to update the canonical task file with durable notes: progress, decisions, changed files, verification results, blockers, and next steps. When that checkpoint turn ends, Ralph automatically forces the fresh iteration and resets the per-iteration count. If compaction 5 happens before the watermark hook can run, the completed compaction still triggers the same checkpoint as a fallback. Compactions that happen while a continuation or checkpoint is already queued still count toward the session total, but do not skip work. `/ralph status` shows the tracking totals, watermark, and active count.
 
 If neither `read` nor `bash` is active, Ralph embeds a task snapshot so restricted/custom tool configurations still work. The constrained `ralph_update` tool replaces only the current session-owned loop's managed task ledger, allowing read-only project roles to record progress without general file-write access. Successful `ralph_start` and `ralph_done` calls terminate their tool turn after queuing the fresh-context continuation, avoiding an extra summary response.
 
