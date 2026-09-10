@@ -10,6 +10,8 @@ This one is cool because:
 
 **Note: This is a flat version without subagents, similar to the [Anthropic plugins implementation](https://github.com/anthropics/claude-code-plugins/tree/main/ralph-loop).**
 
+> **Safety default:** automatic Ralph loops are disabled. Pi cannot cancel an already queued extension follow-up, so a stale continuation could otherwise execute as ordinary user work after pause, completion, or session switching. **Terminate every affected old Pi process** before using the disabled configuration; `/reload`, interrupt, or `/ralph stop` alone does not cancel its queued work. Use fresh sessions for affected transcripts, because a message that was already delivered is persisted. `PI_RALPH_ENABLE_AUTOMATION=1` is an explicitly unsafe opt-in captured when Ralph loads. Completion instructions are always retained for explicit review, never executed automatically.
+
 ## Installation
 
 ```bash
@@ -62,7 +64,7 @@ While a loop is active, Ralph uses a single width-safe line above the editor sho
 | Command | Description |
 |---------|-------------|
 | `/ralph start <name\|path>` | Start a new loop |
-| `/ralph resume <name>` | Resume and explicitly claim a paused/active loop for this Pi session |
+| `/ralph resume <name>` | Disabled for safety: persisted loops may have queued prompts that Pi cannot cancel |
 | `/ralph stop` | Pause the current loop owned by this Pi session |
 | `/ralph-stop` | Stop active loop (idle only) |
 | `/ralph status [name]` | Open current or named loop details (picker/modal in the TUI) |
@@ -81,8 +83,8 @@ While a loop is active, Ralph uses a single width-safe line above the editor sho
 | `--reflect-every N` | Reflect every N iterations |
 | `--compactions-per-iteration N` | Target the Nth compaction for checkpoint/iteration rollover (default `5`; `0` disables) |
 | `--compaction-checkpoint-percent P` | Checkpoint at P% live context usage before the context fills (default `90`; `0` disables) |
-| `--end-instructions "TEXT"` | Store instructions that are revealed only after the loop ends/completes |
-| `--end-instructions-file PATH` | Read completion-only instructions from a file |
+| `--end-instructions "TEXT"` | Store completion-only instructions for review after the loop ends; never run them automatically |
+| `--end-instructions-file PATH` | Read completion-only instructions from a file for post-completion review |
 
 ## State location and session ownership
 
@@ -94,7 +96,7 @@ PI_RALPH_STATE_ROOT=/run/user/$UID/my-worker/ralph pi
 
 Continuation prompts use the configured task-file path, and `/ralph status`, `list`, `archive`, `clean`, `cancel`, and `nuke` all operate on the same configured root. Explicit task paths passed to `/ralph start <path>` remain external and are not moved by changing the state root.
 
-Active execution is Pi-session-owned. A new Pi using the same state root will list active loops without automatically claiming or injecting them into prompts. Use `/ralph resume <name>` when you intentionally want the current Pi session to take over a loop.
+Active execution is Pi-session-owned. A new Pi using the same state root will list active loops without automatically claiming or injecting them into prompts. Do **not** treat `/ralph stop` as queue cancellation: it only records paused state. Terminate the Pi process that owned a loop before continuing unrelated work, and never resume that persisted loop; Pi cannot retract prompts it already queued.
 
 ## Agent Tool
 
@@ -121,9 +123,9 @@ Ralph records both the total number of session compactions and the number charge
 
 If neither `read` nor `bash` is active, Ralph embeds a task snapshot so restricted/custom tool configurations still work. The constrained `ralph_update` tool replaces only the current session-owned loop's managed task ledger, allowing read-only project roles to record progress without general file-write access. Successful `ralph_start` and `ralph_done` calls terminate their tool turn after queuing the fresh-context continuation, avoiding an extra summary response.
 
-`endInstructions` are stored in Ralph state, not inserted into normal iteration prompts or the task file. When the assistant emits `<promise>COMPLETE</promise>` or the loop otherwise ends through Ralph completion handling, the extension sends a follow-up only when hidden end instructions actually exist. A normal completion without end instructions does not spend another model turn.
+`endInstructions` are stored in Ralph state, not inserted into normal iteration prompts or the task file. When the assistant emits `<promise>COMPLETE</promise>` or the loop otherwise ends, Ralph marks the loop completed but **never sends those instructions to the model automatically**. `/ralph status <name>` reveals them only after completion, so the user can explicitly decide whether to request any follow-up work.
 
-Use this for final-only actions like commit/push, cleanup, final reports, publishing, or notifications that would distract the loop if repeated every iteration.
+Use this for final-only reminders such as a proposed commit/push, cleanup, final report, publishing, or notification. Treat them as an approval boundary, not an automatic action queue.
 
 ## Credits
 

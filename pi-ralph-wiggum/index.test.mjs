@@ -11,9 +11,12 @@ const extension = await jiti.import("./index.ts", { default: true });
 function createHarness(options = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "ralph-review-"));
 	const previousStateRoot = process.env.PI_RALPH_STATE_ROOT;
+	const previousAutomation = process.env.PI_RALPH_ENABLE_AUTOMATION;
 	const stateRoot = options.stateRoot ?? join(cwd, ".ralph");
 	if (options.stateRoot) process.env.PI_RALPH_STATE_ROOT = options.stateRoot;
 	else delete process.env.PI_RALPH_STATE_ROOT;
+	if (options.automation === false) delete process.env.PI_RALPH_ENABLE_AUTOMATION;
+	else process.env.PI_RALPH_ENABLE_AUTOMATION = "1";
 	const commands = new Map();
 	const tools = new Map();
 	const events = new Map();
@@ -108,6 +111,8 @@ function createHarness(options = {}) {
 			if (options.stateRoot) rmSync(options.stateRoot, { recursive: true, force: true });
 			if (previousStateRoot === undefined) delete process.env.PI_RALPH_STATE_ROOT;
 			else process.env.PI_RALPH_STATE_ROOT = previousStateRoot;
+			if (previousAutomation === undefined) delete process.env.PI_RALPH_ENABLE_AUTOMATION;
+			else process.env.PI_RALPH_ENABLE_AUTOMATION = previousAutomation;
 		},
 	};
 }
@@ -353,6 +358,24 @@ test("state-mutating Ralph tools require sequential execution", () => {
 		assert.equal(h.tools.get("ralph_start").executionMode, "sequential");
 		assert.equal(h.tools.get("ralph_update").executionMode, "sequential");
 		assert.equal(h.tools.get("ralph_done").executionMode, "sequential");
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("automatic loops fail closed unless process startup explicitly opted in", async () => {
+	const h = createHarness({ automation: false });
+	try {
+		// The extension captures the opt-in at initialization; a later environment
+		// mutation cannot turn this existing Pi session into an automatic loop.
+		process.env.PI_RALPH_ENABLE_AUTOMATION = "1";
+		const result = await startLoop(h);
+		assert.match(result.content[0].text, /disabled for safety/i);
+		assert.equal(existsSync(join(h.cwd, ".ralph", "review-loop.state.json")), false);
+
+		await h.commands.get("ralph").handler("start disabled", h.ctx);
+		assert.ok(h.notifications.some(({ message, level }) => level === "warning" && /PI_RALPH_ENABLE_AUTOMATION=1/.test(message)));
+		assert.equal(existsSync(join(h.cwd, ".ralph", "disabled.state.json")), false);
 	} finally {
 		h.cleanup();
 	}
@@ -656,6 +679,39 @@ test("ralph_done cannot skip a pending compaction notes checkpoint", async () =>
 	}
 });
 
+test("ralph_done cannot skip a manually queued compaction checkpoint", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h, { compactionsPerIteration: 1 });
+		await consumeContinuation(h);
+		const compact = h.events.get("session_compact")[0];
+		await compact({ reason: "manual", willRetry: false }, h.ctx);
+		assert.equal(readState(h, "review-loop").compactionCheckpointQueued, true);
+		assert.equal(h.prompts.length, 2);
+
+		const result = await h.tools.get("ralph_done").execute("call-2", {}, undefined, undefined, h.ctx);
+		assert.match(result.content[0].text, /checkpoint already queued or active/i);
+		assert.equal(result.terminate, true);
+		assert.equal(readState(h, "review-loop").iteration, 1);
+		assert.equal(readState(h, "review-loop").compactionCheckpointQueued, true);
+		assert.equal(h.prompts.length, 2);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test("resume refuses an already active loop so it cannot stack continuations", async () => {
+	const h = createHarness();
+	try {
+		await startLoop(h);
+		await h.commands.get("ralph").handler("resume review-loop", h.ctx);
+		assert.equal(h.prompts.length, 1);
+		assert.match(h.notifications.at(-1).message, /cannot safely resume/i);
+	} finally {
+		h.cleanup();
+	}
+});
+
 test("duplicate ralph_done is rejected while a continuation is pending", async () => {
 	const h = createHarness();
 	try {
@@ -670,7 +726,7 @@ test("duplicate ralph_done is rejected while a continuation is pending", async (
 	}
 });
 
-test("resume preserves the current iteration", async () => {
+test("resume refuses a persisted loop because prior queued prompts cannot be cancelled", async () => {
 	const h = createHarness();
 	try {
 		await startLoop(h);
@@ -678,22 +734,23 @@ test("resume preserves the current iteration", async () => {
 		assert.equal(readState(h, "review-loop").status, "paused");
 
 		await h.commands.get("ralph").handler("resume review-loop", h.ctx);
-		const state = readState(h, "review-loop");
-		assert.equal(state.status, "active");
-		assert.equal(state.iteration, 1);
+		assert.equal(readState(h, "review-loop").status, "paused");
+		assert.equal(h.prompts.length, 1);
+		assert.match(h.notifications.at(-1).message, /cannot safely resume/i);
 	} finally {
 		h.cleanup();
 	}
 });
 
-test("starting another loop pauses the previous session-owned loop", async () => {
+test("starting another loop refuses to leave prior queued prompts behind", async () => {
 	const h = createHarness();
 	try {
 		await startLoop(h, { name: "first" });
-		await startLoop(h, { name: "second" });
+		const result = await startLoop(h, { name: "second" });
 
-		assert.equal(readState(h, "first").status, "paused");
-		assert.equal(readState(h, "second").status, "active");
+		assert.match(result.content[0].text, /cannot safely switch loops/i);
+		assert.equal(readState(h, "first").status, "active");
+		assert.equal(existsSync(join(h.cwd, ".ralph", "second.state.json")), false);
 	} finally {
 		h.cleanup();
 	}
@@ -751,7 +808,7 @@ test("missing task file pauses the loop on ralph_done", async () => {
 	}
 });
 
-test("completion reveals end instructions only when configured", async () => {
+test("completion never auto-runs end instructions", async () => {
 	const h = createHarness();
 	try {
 		await startLoop(h, { endInstructions: "Publish the final report." });
@@ -764,9 +821,13 @@ test("completion reveals end instructions only when configured", async () => {
 			h.ctx,
 		);
 
-		assert.equal(h.prompts.length, 2);
-		assert.match(h.prompts[1], /Publish the final report/);
-		assert.ok(h.prompts[1].length < 160);
+		assert.equal(h.prompts.length, 1);
+		assert.equal(readState(h, "review-loop").status, "completed");
+		assert.ok(h.notifications.some(({ message, level }) => level === "warning" && /retained but not run/i.test(message)));
+
+		h.ctx.mode = "json";
+		await h.commands.get("ralph").handler("status review-loop", h.ctx);
+		assert.match(h.notifications.at(-1).message, /Completion instructions: Publish the final report\./);
 	} finally {
 		h.cleanup();
 	}

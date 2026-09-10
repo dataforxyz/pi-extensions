@@ -16,11 +16,13 @@
 - Replace full task-file replay with short continuation prompts that point to the canonical task file, with a snapshot fallback when no read-capable tool is active.
 - Terminate successful `ralph_start` and `ralph_done` tool turns after queuing the continuation, eliminating the redundant intermediate summary response.
 - Reduce always-on tool guidance, active-loop system instructions, and the Agent Skill to a concise, non-duplicative contract.
-- Send a completion follow-up only when hidden end instructions exist, avoiding a wasted model turn on ordinary completion.
+- Completion-only instructions are retained for explicit post-completion review in `/ralph status`; Ralph no longer injects them as an automatic user follow-up that could perform unintended work.
 - Use atomic state-file replacement and remove redundant shutdown writes.
 - Add focused integration tests for prompt size, resume semantics, loop switching, completion turns, validation, and state writes.
 
 ### Fixed
+- Disable automatic Ralph loops by default (`PI_RALPH_ENABLE_AUTOMATION=1` is an explicit process-start opt-in). Pi cannot retract queued extension follow-ups, which previously allowed stale continuations/checkpoints to execute as ordinary user work after stop, completion, or a session switch.
+- Refuse persisted-loop resume and same-process loop switching, and prevent `ralph_done` from advancing past a queued/manual compaction checkpoint.
 - Arm the context-usage checkpoint even before the first compaction, so long-context models checkpoint durable notes before an iteration fills their window.
 - Keep completed loops at their configured maximum iteration (N/N), rather than incrementing state to N+1/N while finalizing.
 - Document the unavoidable queued-follow-up limitation when an agent emits `COMPLETE` after calling `ralph_done` in the same run: Pi has no follow-up cancellation API, so that already queued message may still run.
