@@ -16,6 +16,10 @@ import { Type } from "typebox";
 
 const RALPH_DIR = ".ralph";
 const RALPH_STATE_ROOT_ENV = "PI_RALPH_STATE_ROOT";
+// Ralph's continuation/checkpoint prompts are executable user messages and Pi has
+// no API to retract a queued follow-up. Keep automatic loops off by default until
+// that primitive exists. The explicit opt-in is captured when this extension loads.
+const RALPH_AUTOMATION_ENV = "PI_RALPH_ENABLE_AUTOMATION";
 const COMPLETE_MARKER = "<promise>COMPLETE</promise>";
 
 const DEFAULT_TEMPLATE = `# Task
@@ -94,6 +98,11 @@ export default function (pi: ExtensionAPI) {
 		const configured = process.env[RALPH_STATE_ROOT_ENV]?.trim();
 		return configured ? path.resolve(ctx.cwd, configured) : path.resolve(ctx.cwd, RALPH_DIR);
 	};
+	// Capture the opt-in at extension initialization. A later environment mutation
+	// must not turn an already-running Pi session into an automatic loop.
+	const automationEnabled = process.env[RALPH_AUTOMATION_ENV] === "1";
+	const automationDisabledMessage =
+		`Ralph automatic loops are disabled for safety. Set ${RALPH_AUTOMATION_ENV}=1 before loading Ralph to opt in; queued Ralph prompts cannot be cancelled by Pi.`;
 	const archiveDir = (ctx: ExtensionContext) => path.join(ralphDir(ctx), "archive");
 	const sanitize = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+/g, "_");
 	const defaultTaskFile = (ctx: ExtensionContext, name: string) => {
@@ -307,11 +316,11 @@ export default function (pi: ExtensionAPI) {
 		finalizeLoop(ctx, state);
 		if (ctx.hasUI) ctx.ui.notify(`Ralph ${state.name}: ${reason}`, level);
 
-		const endInstructions = state.endInstructions.trim();
-		if (endInstructions) {
-			pi.sendUserMessage(`[Ralph ${state.name} finished: ${reason}]\n\n${endInstructions}`, {
-				deliverAs: "followUp",
-			});
+		if (state.endInstructions.trim() && ctx.hasUI) {
+			ctx.ui.notify(
+				`Ralph ${state.name}: completion instructions were retained but not run. Review them in /ralph status ${state.name} and explicitly send any desired follow-up.`,
+				"warning",
+			);
 		}
 	}
 
@@ -408,6 +417,9 @@ export default function (pi: ExtensionAPI) {
 			details.push(["Compactions", `${state.totalCompactions} total (forcing disabled)`]);
 		}
 		if (state.completedAt) details.push(["Completed", formatTimestamp(state.completedAt)]);
+		if (state.status === "completed" && state.endInstructions.trim()) {
+			details.push(["Completion instructions", state.endInstructions.trim()]);
+		}
 		return details;
 	}
 
@@ -529,6 +541,10 @@ export default function (pi: ExtensionAPI) {
 		isReflection: boolean,
 		triggerNote?: string,
 	): boolean {
+		if (!automationEnabled) {
+			pauseLoop(ctx, state, automationDisabledMessage);
+			return false;
+		}
 		const taskPath = path.resolve(ctx.cwd, state.taskFile);
 		let activeTools: Set<string>;
 		try {
@@ -578,6 +594,10 @@ export default function (pi: ExtensionAPI) {
 		deliverAs: "steer" | "followUp" = "followUp",
 		reason?: string,
 	): void {
+		if (!automationEnabled) {
+			pauseLoop(ctx, state, automationDisabledMessage);
+			return;
+		}
 		state.compactionAdvancePending = false;
 		state.compactionCheckpointQueued = true;
 		state.compactionCheckpointActive = false;
@@ -646,6 +666,10 @@ export default function (pi: ExtensionAPI) {
 
 	const commands: Record<string, (rest: string, ctx: ExtensionCommandContext) => void | Promise<void>> = {
 		start(rest, ctx) {
+			if (!automationEnabled) {
+				ctx.ui.notify(automationDisabledMessage, "warning");
+				return;
+			}
 			const args = parseArgs(rest);
 			if (!args.name) {
 				ctx.ui.notify(
@@ -681,7 +705,13 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			pauseCurrentForSwitch(ctx, loopName);
+			if (currentLoop && currentLoop !== loopName) {
+				ctx.ui.notify(
+					"Ralph cannot safely switch loops in one Pi process because it cannot cancel the prior loop's queued prompts. Start a fresh Pi process instead.",
+					"warning",
+				);
+				return;
+			}
 
 			const fullPath = path.resolve(ctx.cwd, taskFile);
 			if (!fs.existsSync(fullPath)) {
@@ -735,32 +765,11 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify("No active Ralph loop owned by this session. Use /ralph resume <name> to claim one.", "warning");
 		},
 
-		resume(rest, ctx) {
-			const loopName = normalizeLoopName(rest);
-			if (!loopName) {
-				ctx.ui.notify("Usage: /ralph resume <name>", "warning");
-				return;
-			}
-
-			const state = loadState(ctx, loopName);
-			if (!state) {
-				ctx.ui.notify(`Loop "${loopName}" not found`, "error");
-				return;
-			}
-			if (state.status === "completed") {
-				ctx.ui.notify(`Loop "${loopName}" is completed. Use /ralph start ${loopName} to restart`, "warning");
-				return;
-			}
-
-			pauseCurrentForSwitch(ctx, loopName);
-
-			const previousOwner = formatOwner(ctx, state);
-			state.status = "active";
-			claimLoop(ctx, state);
-			currentLoop = loopName;
-
-			if (!queueContinuation(ctx, state, false)) return;
-			ctx.ui.notify(`Resumed/claimed: ${loopName} (iteration ${state.iteration}, previous owner: ${previousOwner})`, "info");
+		resume(_rest, ctx) {
+			ctx.ui.notify(
+				"Ralph cannot safely resume a persisted loop: Pi cannot cancel prompts queued by its previous run. Start a fresh Pi process and a new loop instead.",
+				"warning",
+			);
 		},
 
 		async status(rest, ctx) {
@@ -911,8 +920,8 @@ Options:
   --max-iterations N            Stop after N iterations (default 50)
   --compactions-per-iteration N  Checkpoint notes and force a new iteration around N compactions (default 5; 0 disables)
   --compaction-checkpoint-percent P  Checkpoint before context fills at P% usage (default 90)
-  --end-instructions "TEXT"     Show TEXT only after loop completion
-  --end-instructions-file PATH  Read completion-only instructions from PATH
+  --end-instructions "TEXT"     Retain TEXT for explicit review after completion (never auto-run)
+  --end-instructions-file PATH  Read completion-only instructions for post-completion review
 
 To stop: press ESC to interrupt, then run /ralph-stop when idle
 
@@ -993,7 +1002,7 @@ Examples:
 					default: 90,
 				}),
 			),
-			endInstructions: Type.Optional(Type.String({ description: "Final-only instructions revealed after completion" })),
+			endInstructions: Type.Optional(Type.String({ description: "Completion-only instructions retained for explicit review; never run automatically" })),
 		}),
 		prepareArguments(args): RalphStartInput {
 			if (!args || typeof args !== "object") return args as RalphStartInput;
@@ -1008,6 +1017,9 @@ Examples:
 			return normalized as unknown as RalphStartInput;
 		},
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (!automationEnabled) {
+				return { content: [{ type: "text", text: automationDisabledMessage }], details: {} };
+			}
 			const loopName = normalizeLoopName(params.name);
 			if (!loopName) {
 				return {
@@ -1030,7 +1042,12 @@ Examples:
 				};
 			}
 
-			pauseCurrentForSwitch(ctx, loopName);
+			if (currentLoop && currentLoop !== loopName) {
+				return {
+					content: [{ type: "text", text: "Ralph cannot safely switch loops in one Pi process because it cannot cancel the prior loop's queued prompts. Start a fresh Pi process instead." }],
+					details: {},
+				};
+			}
 
 			const fullPath = path.resolve(ctx.cwd, taskFile);
 			ensureDir(fullPath);
@@ -1144,6 +1161,17 @@ Examples:
 					details: {},
 				};
 			}
+			if (!automationEnabled) {
+				pauseLoop(ctx, state, automationDisabledMessage);
+				return { content: [{ type: "text", text: automationDisabledMessage }], details: {}, terminate: true };
+			}
+			if (state.compactionCheckpointQueued || state.compactionCheckpointActive) {
+				return {
+					content: [{ type: "text", text: "Ralph checkpoint already queued or active. Finish it before advancing the iteration." }],
+					details: {},
+					terminate: true,
+				};
+			}
 
 			// Do not gate on ctx.hasPendingMessages() here. Other extensions can
 			// enqueue/append non-user work around tool completion, and Pi only exposes a
@@ -1239,6 +1267,10 @@ Examples:
 		if (!state || state.status !== "active" || !isOwnedByCurrentSession(ctx, state)) {
 			currentLoop = null;
 			updateUI(ctx);
+			return;
+		}
+		if (!automationEnabled) {
+			pauseLoop(ctx, state, automationDisabledMessage);
 			return;
 		}
 
@@ -1396,6 +1428,13 @@ Examples:
 	pi.on("session_start", async (_event, ctx) => {
 		const active = listLoops(ctx).filter((l) => l.status === "active");
 		const ownedActive = active.filter((l) => isOwnedByCurrentSession(ctx, l));
+
+		if (!automationEnabled) {
+			for (const loop of ownedActive) pauseLoop(ctx, loop);
+			if (ownedActive.length > 0 && ctx.hasUI) ctx.ui.notify(automationDisabledMessage, "warning");
+			updateUI(ctx);
+			return;
+		}
 
 		// Rehydrate only loops explicitly owned by this Pi session. This preserves
 		// reload/compaction continuity without letting a new Pi in the same cwd

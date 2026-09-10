@@ -5,7 +5,9 @@ description: Long-running iterative development loops with pacing control and ve
 
 # Ralph Wiggum Loops
 
-Start a loop with `ralph_start`:
+> **Safety default:** automatic Ralph loops are disabled because Pi cannot cancel an already queued extension follow-up. **Terminate every affected old Pi process** before using the disabled configuration: `/reload`, interrupt, or `/ralph stop` alone does not cancel queued work. Use fresh sessions for affected transcripts, because a message already delivered is persisted. Do not enable `PI_RALPH_ENABLE_AUTOMATION=1` unless you accept the remaining queue risk; the opt-in is captured when Ralph loads. Completion-only instructions are retained for explicit post-completion review and are never run automatically.
+
+Start a loop only after explicitly opting in with `PI_RALPH_ENABLE_AUTOMATION=1` before Ralph loads:
 
 ```ts
 ralph_start({
@@ -31,12 +33,12 @@ ralph_start({
 7. Each iteration uses a fresh model context beginning at its continuation marker. Earlier conversation and prior iterations remain in the transcript but are excluded from the model request.
 8. Continuation prompts reference the task file rather than replaying it. The task file is the cross-iteration memory.
 9. `compactionsPerIteration` defaults to 5 and `compactionCheckpointPercent` defaults to 90. Ralph watches live context usage and checkpoints durable notes at 90% before the context fills; compaction 5 is the fallback trigger. The note-taking turn is followed automatically by a fresh iteration. Set `compactionsPerIteration` to 0 to disable forcing.
-10. `endInstructions`, when provided, remain hidden until completion.
+10. `endInstructions`, when provided, remain hidden until completion. Ralph never runs them automatically; after completion, review them in `/ralph status <name>` and ask explicitly for any desired follow-up.
 
 ## Commands
 
 - `/ralph start <name|path>` — start and claim a loop.
-- `/ralph resume <name>` — resume or explicitly claim a loop.
+- `/ralph resume <name>` — disabled for safety. Persisted loops may have queued prompts that Pi cannot cancel; start a fresh process and a new loop only after terminating the old process.
 - `/ralph stop` — pause the loop owned by this session.
 - `/ralph-stop` — end the owned active loop while idle.
 - `/ralph status [name]` — open current or named loop details.
